@@ -67,9 +67,27 @@ impl TokenDisplay {
             return;
         }
 
-        for token_info in tokens {
-            let token_widget = self.create_token_widget(&token_info);
+        // Limit display to 200 tokens for performance
+        const MAX_DISPLAY_TOKENS: usize = 200;
+        let total_tokens = tokens.len();
+        let display_count = total_tokens.min(MAX_DISPLAY_TOKENS);
+
+        for token_info in tokens.iter().take(display_count) {
+            let token_widget = self.create_token_widget(token_info);
             self.flow_box.append(&token_widget);
+        }
+
+        // Show a message if tokens were truncated
+        if total_tokens > MAX_DISPLAY_TOKENS {
+            let truncate_msg = gtk::Label::builder()
+                .label(&format!("... and {} more tokens (showing first {})",
+                    total_tokens - MAX_DISPLAY_TOKENS,
+                    MAX_DISPLAY_TOKENS))
+                .css_classes(vec!["dim-label".to_string(), "caption".to_string()])
+                .margin_top(12)
+                .margin_bottom(12)
+                .build();
+            self.flow_box.append(&truncate_msg);
         }
     }
 
@@ -93,9 +111,12 @@ impl TokenDisplay {
         let escaped_token = escape_token(&token_info.token);
         let token_label = gtk::Label::builder()
             .label(&format!("\"{}\"", escaped_token))
-            .use_markup(false)
+            .use_markup(false)  // Explicitly disable markup to avoid parsing issues
             .selectable(true)
             .css_classes(vec!["monospace".to_string()])
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(20)
             .build();
 
         // Apply color based on token type

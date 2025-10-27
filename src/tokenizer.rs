@@ -16,6 +16,7 @@ pub struct TokenizerPage {
     test_input: gtk::TextView,
     token_display: TokenDisplay,
     summary_label: gtk::Label,
+    debounce_cancelled: Rc<RefCell<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +247,7 @@ impl TokenizerPage {
             test_input: test_input.clone(),
             token_display: token_display.clone(),
             summary_label: summary_label.clone(),
+            debounce_cancelled: Rc::new(RefCell::new(false)),
         };
 
         // Connect search
@@ -268,38 +270,60 @@ impl TokenizerPage {
             }
         });
 
-        // Connect test input - watch for buffer changes instead of entry changes
+        // Connect test input with debouncing for better performance
         let token_store_weak = Rc::downgrade(&token_store);
         let token_display_weak = token_display.clone();
         let summary_label_weak = summary_label.clone();
+        let debounce_cancelled_weak = page.debounce_cancelled.clone();
         let input_buffer_weak = input_buffer.downgrade();
 
         input_buffer.connect_changed(move |buffer| {
-            if let Some(store) = token_store_weak.upgrade() {
-                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-                let tokens = store.borrow();
+            // Mark any previous pending timeout as cancelled
+            *debounce_cancelled_weak.borrow_mut() = true;
 
-                // Simple tokenization simulation (greedy longest match)
-                let (token_infos, char_count) = tokenize_to_display(&text, &tokens);
+            let store_weak = token_store_weak.clone();
+            let display_weak = token_display_weak.clone();
+            let label_weak = summary_label_weak.clone();
+            let buffer_weak = buffer.downgrade();
+            let cancelled_weak = debounce_cancelled_weak.clone();
 
-                // Update summary label
-                if !token_infos.is_empty() {
-                    let ratio = char_count as f64 / token_infos.len() as f64;
-                    summary_label_weak.set_text(&format!(
-                        "{} tokens • {} characters • {:.2} chars/token",
-                        token_infos.len(),
-                        char_count,
-                        ratio
-                    ));
-                } else if !text.is_empty() && text != "Enter text to tokenize..." {
-                    summary_label_weak.set_text("⚠ No tokens matched (using simplified tokenizer)");
-                } else {
-                    summary_label_weak.set_text("");
+            // Schedule new update with debouncing (150ms delay)
+            glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+                // Check if this timeout was cancelled by a newer input event
+                if *cancelled_weak.borrow() {
+                    *cancelled_weak.borrow_mut() = false;
+                    return glib::ControlFlow::Break;
+                }
+                if let (Some(store), Some(buffer)) = (store_weak.upgrade(), buffer_weak.upgrade()) {
+                    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                    let tokens = store.borrow();
+
+                    // Simple tokenization simulation (greedy longest match)
+                    let (token_infos, char_count) = tokenize_to_display(&text, &tokens);
+
+                    // Update summary label
+                    if !token_infos.is_empty() {
+                        let ratio = char_count as f64 / token_infos.len() as f64;
+                        label_weak.set_text(&format!(
+                            "{} tokens • {} characters • {:.2} chars/token",
+                            token_infos.len(),
+                            char_count,
+                            ratio
+                        ));
+                    } else if !text.is_empty() && text != "Enter text to tokenize..." {
+                        label_weak.set_text("⚠ No tokens matched (using simplified tokenizer)");
+                    } else {
+                        label_weak.set_text("");
+                    }
+
+                    // Update token display
+                    display_weak.set_tokens(token_infos);
                 }
 
-                // Update token display
-                token_display_weak.set_tokens(token_infos);
-            }
+                glib::ControlFlow::Break
+            });
+
+            // Source ID not needed - we use the cancelled flag instead
         });
 
         // Clear placeholder on focus

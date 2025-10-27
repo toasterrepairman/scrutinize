@@ -59,7 +59,7 @@
             # for desktop files
             install -Dt $out/share/applications resources/scrutinize.desktop
 
-            install -Dt $out/share/icons resources/icon-scrutinize.png
+            # install -Dt $out/share/icons resources/icon-scrutinize.png
         '';
       };
 
@@ -72,7 +72,7 @@
       };
 
       meta = with nixpkgs.lib; {
-        description = "admiral";
+        description = "scrutinize";
         license = licenses.gpl3;
         platforms = platforms.all;
       };
