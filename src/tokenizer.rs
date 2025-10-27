@@ -6,11 +6,13 @@ use std::rc::Rc;
 
 use crate::gguf_parser::{GGUFFile, MetadataValue};
 use crate::token_display::{TokenDisplay, TokenInfo};
+use crate::optimized_tokenizer::TokenizerTrie;
 
 #[derive(Clone)]
 pub struct TokenizerPage {
     widget: adw::Bin,
     token_store: Rc<RefCell<Vec<TokenData>>>,
+    tokenizer_trie: Rc<RefCell<TokenizerTrie>>,
     list_view: gtk::ListView,
     search_entry: SearchEntry,
     test_input: gtk::TextView,
@@ -167,6 +169,7 @@ impl TokenizerPage {
 
         // Create token list with better styling
         let token_store = Rc::new(RefCell::new(Vec::new()));
+        let tokenizer_trie = Rc::new(RefCell::new(TokenizerTrie::new()));
 
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection_model = gtk::NoSelection::new(Some(model.clone()));
@@ -242,6 +245,7 @@ impl TokenizerPage {
         let page = Self {
             widget,
             token_store: token_store.clone(),
+            tokenizer_trie: tokenizer_trie.clone(),
             list_view,
             search_entry: search_entry.clone(),
             test_input: test_input.clone(),
@@ -272,6 +276,7 @@ impl TokenizerPage {
 
         // Connect test input with debouncing for better performance
         let token_store_weak = Rc::downgrade(&token_store);
+        let tokenizer_trie_weak = Rc::downgrade(&tokenizer_trie);
         let token_display_weak = token_display.clone();
         let summary_label_weak = summary_label.clone();
         let debounce_cancelled_weak = page.debounce_cancelled.clone();
@@ -282,6 +287,7 @@ impl TokenizerPage {
             *debounce_cancelled_weak.borrow_mut() = true;
 
             let store_weak = token_store_weak.clone();
+            let trie_weak = tokenizer_trie_weak.clone();
             let display_weak = token_display_weak.clone();
             let label_weak = summary_label_weak.clone();
             let buffer_weak = buffer.downgrade();
@@ -294,12 +300,11 @@ impl TokenizerPage {
                     *cancelled_weak.borrow_mut() = false;
                     return glib::ControlFlow::Break;
                 }
-                if let (Some(store), Some(buffer)) = (store_weak.upgrade(), buffer_weak.upgrade()) {
+                if let (Some(store), Some(trie), Some(buffer)) = (store_weak.upgrade(), trie_weak.upgrade(), buffer_weak.upgrade()) {
                     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-                    let tokens = store.borrow();
 
-                    // Simple tokenization simulation (greedy longest match)
-                    let (token_infos, char_count) = tokenize_to_display(&text, &tokens);
+                    // Use optimized trie-based tokenization
+                    let (token_infos, char_count) = tokenize_to_display_optimized(&text, &store.borrow(), &trie.borrow());
 
                     // Update summary label
                     if !token_infos.is_empty() {
@@ -393,6 +398,18 @@ impl TokenizerPage {
 
         *self.token_store.borrow_mut() = tokens.clone();
 
+        // Build optimized trie from tokens for fast tokenization
+        let mut trie = self.tokenizer_trie.borrow_mut();
+        let token_tuples: Vec<(usize, String, f32, u32)> = tokens.iter()
+            .map(|t| (t.id, t.token.clone(), t.score, t.token_type))
+            .collect();
+        trie.build(&token_tuples);
+
+        // Print trie stats for debugging/optimization
+        let stats = trie.memory_stats();
+        println!("Tokenizer trie built: {} nodes, {} tokens, ~{} KB memory",
+                 stats.node_count, stats.token_count, stats.estimated_memory_bytes() / 1024);
+
         // Update list view
         if let Some(selection_model) = self.list_view.model() {
             if let Some(selection_model) = selection_model.downcast_ref::<gtk::NoSelection>() {
@@ -430,6 +447,47 @@ fn format_token_type(token_type: u32) -> &'static str {
     }
 }
 
+fn tokenize_to_display_optimized(text: &str, tokens: &[TokenData], trie: &TokenizerTrie) -> (Vec<TokenInfo>, usize) {
+    if text.is_empty() || text == "Enter text to tokenize..." {
+        return (Vec::new(), 0);
+    }
+
+    if tokens.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let char_count = text.len();
+
+    // Use optimized trie tokenization with limit for UI display
+    const MAX_DISPLAY_TOKENS: usize = 500;
+    let (token_results, _truncated) = trie.tokenize_limited(text, MAX_DISPLAY_TOKENS);
+
+    // Convert to TokenInfo for display
+    let mut token_infos = Vec::new();
+    let mut byte_offset = 0;
+
+    for (token_id, token_len, score, token_type) in token_results {
+        // Extract the actual token string from the original text
+        if byte_offset + token_len <= text.len() {
+            let token_str = &text[byte_offset..byte_offset + token_len];
+
+            token_infos.push(TokenInfo {
+                index: token_infos.len(),
+                id: token_id,
+                token: token_str.to_string(),
+                score,
+                token_type,
+            });
+
+            byte_offset += token_len;
+        }
+    }
+
+    (token_infos, char_count)
+}
+
+// Keep the old function for reference or fallback
+#[allow(dead_code)]
 fn tokenize_to_display(text: &str, tokens: &[TokenData]) -> (Vec<TokenInfo>, usize) {
     if text.is_empty() || text == "Enter text to tokenize..." {
         return (Vec::new(), 0);
