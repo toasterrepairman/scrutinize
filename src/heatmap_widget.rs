@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::tensor_slice::SliceSelection;
 
 /// Configuration for heatmap rendering
-const MAX_HEATMAP_DIMENSION: usize = 200; // Reduced for better performance
+const MAX_HEATMAP_DIMENSION: usize = 256; // Max resolution for heatmap visualization
 const MIN_CELL_SIZE: f64 = 2.0; // Minimum pixel size for each cell
 const MAX_DISPLAY_WIDTH: f64 = 400.0; // Maximum widget width
 const MAX_DISPLAY_HEIGHT: f64 = 400.0; // Maximum widget height
@@ -921,27 +921,36 @@ fn compute_histogram_tooltip(x: f64, y: f64, width: f64, height: f64, data: &Hea
 
 /// Color gradient matching the memory visualizer (green to blue)
 /// Used to maintain visual consistency across the application
+/// Uses a smooth multi-stop gradient to avoid color banding
 fn memory_viz_color_gradient(t: f64) -> (f64, f64, f64) {
     let t = t.clamp(0.0, 1.0);
 
-    // Gradient from green (low values) to blue (high values)
-    // Matches the color scheme used in tensor_viewer.rs for memory visualization
-    // Green (muted): RGB(0.37, 0.62, 0.31) -> Green (bright): RGB(0.46, 0.78, 0.39)
-    // Blue (muted): RGB(0.20, 0.47, 0.80) -> Blue (bright): RGB(0.25, 0.59, 0.95)
+    // Multi-stop gradient for smoother transitions:
+    // 0.0: Dark green (low values)
+    // 0.33: Bright green
+    // 0.66: Cyan (transition)
+    // 1.0: Bright blue (high values)
 
-    if t < 0.5 {
-        // Green range (low to medium values)
-        let local_t = t * 2.0; // Map 0-0.5 to 0-1
+    if t < 0.33 {
+        // Dark green to bright green
+        let local_t = t / 0.33;
         let r = 0.37 + (0.46 - 0.37) * local_t;
         let g = 0.62 + (0.78 - 0.62) * local_t;
         let b = 0.31 + (0.39 - 0.31) * local_t;
         (r, g, b)
+    } else if t < 0.66 {
+        // Bright green to cyan
+        let local_t = (t - 0.33) / 0.33;
+        let r = 0.46 + (0.35 - 0.46) * local_t;
+        let g = 0.78 + (0.70 - 0.78) * local_t;
+        let b = 0.39 + (0.70 - 0.39) * local_t;
+        (r, g, b)
     } else {
-        // Transition to blue range (medium to high values)
-        let local_t = (t - 0.5) * 2.0; // Map 0.5-1.0 to 0-1
-        let r = 0.46 + (0.25 - 0.46) * local_t;
-        let g = 0.78 + (0.59 - 0.78) * local_t;
-        let b = 0.39 + (0.95 - 0.39) * local_t;
+        // Cyan to bright blue
+        let local_t = (t - 0.66) / 0.34;
+        let r = 0.35 + (0.25 - 0.35) * local_t;
+        let g = 0.70 + (0.59 - 0.70) * local_t;
+        let b = 0.70 + (0.95 - 0.70) * local_t;
         (r, g, b)
     }
 }

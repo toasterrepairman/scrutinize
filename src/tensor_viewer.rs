@@ -380,15 +380,9 @@ impl TensorPage {
         glib::spawn_future_local(async move {
             use crate::tensor_slice::SliceSelection;
 
-            // Determine max elements based on model size
-            // For large models (>20GB), use more aggressive quantization
-            let max_elements = if tensor_clone.size_bytes > 20 * 1024 * 1024 * 1024 {
-                512 * 256  // 131k elements max for very large models
-            } else if tensor_clone.size_bytes > 5 * 1024 * 1024 * 1024 {
-                1024 * 512  // 524k elements for large models
-            } else {
-                2048 * 1024  // 2M elements for smaller models
-            };
+            // Cap at 256x256 = 65,536 elements max for visualization
+            // This provides good quality while keeping performance snappy
+            let max_elements = 256 * 256;
 
             // Create smart slice selection for 3D+ tensors
             let slice_selection = if tensor_clone.dimensions.len() > 2 {
@@ -419,13 +413,8 @@ impl TensorPage {
 
                 // Spawn async task to reload data
                 glib::spawn_future_local(async move {
-                    let max_elements = if tensor.size_bytes > 20 * 1024 * 1024 * 1024 {
-                        512 * 256
-                    } else if tensor.size_bytes > 5 * 1024 * 1024 * 1024 {
-                        1024 * 512
-                    } else {
-                        2048 * 1024
-                    };
+                    // Cap at 256x256 for consistent performance
+                    let max_elements = 256 * 256;
 
                     match tensor.read_tensor_data_with_slice(&path, max_elements, Some(&new_selection)) {
                         Ok(data) => {

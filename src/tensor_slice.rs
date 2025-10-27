@@ -47,39 +47,50 @@ impl SliceSelection {
     }
 
     /// Create a smart default based on tensor name and shape
-    /// Recognizes common patterns like attention weights, embeddings, etc.
+    /// Strategy: Always display the TWO LARGEST dimensions (resampled into heatmap)
+    /// and provide sliders for all smaller dimensions. This ensures:
+    /// 1. Maximum data visibility (large dimensions shown)
+    /// 2. Minimal slicing needed (small dimensions controlled via sliders)
+    /// 3. Intuitive navigation (slice through fewer, smaller layers)
     pub fn smart_default(name: &str, shape: Vec<u64>) -> Self {
         if shape.len() <= 2 {
             return Self::default_for_shape(shape);
         }
 
-        let name_lower = name.to_lowercase();
+        // For 3D+ tensors, ALWAYS display the two largest dimensions
+        // and slice through all smaller dimensions
 
-        // Attention weights: [heads, seq, seq] or [batch, heads, seq, seq]
-        if name_lower.contains("attn") && shape.len() >= 3 {
-            let last_two_equal = shape[shape.len() - 1] == shape[shape.len() - 2];
-            if last_two_equal {
-                // Likely attention matrix - show last two dims (seq x seq)
-                return Self::default_for_shape(shape);
+        // Create a list of (dimension_index, dimension_size) and sort by size descending
+        let mut dims_with_size: Vec<(usize, u64)> = shape.iter()
+            .enumerate()
+            .map(|(idx, &size)| (idx, size))
+            .collect();
+        dims_with_size.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+
+        // Take the two largest dimensions
+        let largest_dim_0 = dims_with_size[0].0;
+        let largest_dim_1 = dims_with_size[1].0;
+
+        // Ensure display_dims are ordered by index (for consistency in layout)
+        let display_dims = if largest_dim_0 < largest_dim_1 {
+            (largest_dim_0, largest_dim_1)
+        } else {
+            (largest_dim_1, largest_dim_0)
+        };
+
+        // Fix all non-displayed dimensions to 0 (these will be the slider controls)
+        let mut fixed_indices = HashMap::new();
+        for i in 0..shape.len() {
+            if i != display_dims.0 && i != display_dims.1 {
+                fixed_indices.insert(i, 0);
             }
         }
 
-        // For very large outer dimensions, might want to show different slices
-        // e.g., [32, 4096, 128] -> show (1, 2) which is 4096x128
-        if shape.len() == 3 && shape[0] < 64 {
-            let display_dims = (1, 2);
-            let mut fixed_indices = HashMap::new();
-            fixed_indices.insert(0, 0);
-
-            return Self {
-                shape,
-                display_dims,
-                fixed_indices,
-            };
+        Self {
+            shape,
+            display_dims,
+            fixed_indices,
         }
-
-        // Default: show last two dimensions
-        Self::default_for_shape(shape)
     }
 
     /// Get the 2D shape of the displayable slice (height, width)
@@ -166,7 +177,7 @@ impl SliceSelection {
             }
 
             let current_idx = *self.fixed_indices.get(&dim_idx).unwrap_or(&0);
-            let name = Self::dimension_name(dim_idx, self.shape.len());
+            let name = Self::dimension_name(dim_idx, self.shape.len(), &self.shape);
 
             result.push((dim_idx, name, size, current_idx));
         }
@@ -175,14 +186,26 @@ impl SliceSelection {
     }
 
     /// Generate a human-readable name for a dimension
-    fn dimension_name(dim_idx: usize, total_dims: usize) -> String {
-        // Common patterns
-        match (dim_idx, total_dims) {
-            (0, 3) => "Layer/Head".to_string(),
-            (0, 4) => "Batch".to_string(),
-            (1, 4) => "Channel/Head".to_string(),
-            _ => format!("Dim {}", dim_idx),
-        }
+    fn dimension_name(dim_idx: usize, total_dims: usize, shape: &[u64]) -> String {
+        let size = shape[dim_idx];
+
+        // Since we always slice through smaller dimensions now, use descriptive names
+        // based on common patterns and position
+        let base_name = match (dim_idx, total_dims) {
+            // 3D tensors
+            (0, 3) => "Layer",
+            (1, 3) => "Channel",
+            (2, 3) => "Depth",
+            // 4D tensors
+            (0, 4) => "Batch",
+            (1, 4) => "Channel",
+            (2, 4) => "Layer",
+            (3, 4) => "Head",
+            // Generic
+            _ => "Dimension",
+        };
+
+        format!("{} ({})", base_name, size)
     }
 }
 
@@ -238,5 +261,41 @@ mod tests {
         assert_eq!(sliceable[0].2, 8);  // dim size
         assert_eq!(sliceable[1].0, 1);
         assert_eq!(sliceable[1].2, 32);
+    }
+
+    #[test]
+    fn test_smart_default_slices_smallest_dimension() {
+        // For a tensor like [2880, 2880, 32], we want to display 2880x2880
+        // and slice through the 32 (dimension 2)
+        let slice = SliceSelection::smart_default("test", vec![2880, 2880, 32]);
+
+        // Should display the two largest dimensions (0 and 1)
+        assert_eq!(slice.display_dims, (0, 1));
+        assert_eq!(slice.slice_shape(), (2880, 2880));
+
+        // Should have fixed dimension 2 (the smallest)
+        assert_eq!(slice.fixed_indices.len(), 1);
+        assert_eq!(slice.fixed_indices.get(&2), Some(&0));
+
+        // The sliceable dimension should be dimension 2 with size 32
+        let sliceable = slice.sliceable_dimensions();
+        assert_eq!(sliceable.len(), 1);
+        assert_eq!(sliceable[0].0, 2); // dimension index
+        assert_eq!(sliceable[0].2, 32); // dimension size
+    }
+
+    #[test]
+    fn test_smart_default_with_small_first_dim() {
+        // For a tensor like [32, 4096, 4096], we want to display 4096x4096
+        // and slice through the 32 (dimension 0)
+        let slice = SliceSelection::smart_default("test", vec![32, 4096, 4096]);
+
+        // Should display dimensions 1 and 2 (the two largest)
+        assert_eq!(slice.display_dims, (1, 2));
+        assert_eq!(slice.slice_shape(), (4096, 4096));
+
+        // Should have fixed dimension 0 (the smallest)
+        assert_eq!(slice.fixed_indices.len(), 1);
+        assert_eq!(slice.fixed_indices.get(&0), Some(&0));
     }
 }
