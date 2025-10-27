@@ -251,6 +251,11 @@ impl GGUFWindow {
 
         content.append(&header_group);
 
+        // MoE (Mixture of Experts) widget - only show for MoE models
+        if let Some(arch) = gguf_file.metadata.get_string("general.architecture") {
+            self.build_moe_widget_if_applicable(&content, gguf_file, &arch);
+        }
+
         // Architecture parameters
         if let Some(arch) = gguf_file.metadata.get_string("general.architecture") {
             let arch_group = adw::PreferencesGroup::builder()
@@ -383,6 +388,161 @@ impl GGUFWindow {
 
         self.overview_page.set_child(Some(&clamp));
     }
+
+    fn build_moe_widget_if_applicable(&self, content: &GtkBox, gguf_file: &GGUFFile, arch: &str) {
+        // Check if this is an MoE model by looking for expert_count metadata
+        let expert_count = gguf_file.metadata.get_u32(&format!("{}.expert_count", arch));
+        let expert_used_count = gguf_file.metadata.get_u32(&format!("{}.expert_used_count", arch));
+
+        if let Some(total_experts) = expert_count {
+            // Validate that we have a reasonable expert count
+            if total_experts == 0 {
+                return;
+            }
+            let moe_group = adw::PreferencesGroup::builder()
+                .title("Mixture of Experts (MoE)")
+                .margin_top(24)
+                .build();
+
+            // Create a custom widget container for the MoE visualization
+            let moe_box = GtkBox::new(Orientation::Vertical, 12);
+            moe_box.set_margin_top(12);
+            moe_box.set_margin_bottom(12);
+            moe_box.set_margin_start(12);
+            moe_box.set_margin_end(12);
+
+            // Expert counts row
+            let active_experts = expert_used_count.unwrap_or(2); // Default to 2 if not specified
+
+            let expert_info_box = GtkBox::new(Orientation::Horizontal, 12);
+            expert_info_box.set_halign(gtk::Align::Center);
+
+            // Total experts label
+            let total_label_box = GtkBox::new(Orientation::Vertical, 4);
+            let total_value = gtk::Label::new(Some(&format!("{}", total_experts)));
+            total_value.add_css_class("title-1");
+            let total_caption = gtk::Label::new(Some("Total Experts"));
+            total_caption.add_css_class("dim-label");
+            total_caption.add_css_class("caption");
+            total_label_box.append(&total_value);
+            total_label_box.append(&total_caption);
+
+            // Separator
+            let separator = gtk::Separator::new(Orientation::Vertical);
+
+            // Active experts label
+            let active_label_box = GtkBox::new(Orientation::Vertical, 4);
+            let active_value = gtk::Label::new(Some(&format!("{}", active_experts)));
+            active_value.add_css_class("title-1");
+            active_value.add_css_class("accent");
+            let active_caption = gtk::Label::new(Some("Active per Token"));
+            active_caption.add_css_class("dim-label");
+            active_caption.add_css_class("caption");
+            active_label_box.append(&active_value);
+            active_label_box.append(&active_caption);
+
+            expert_info_box.append(&total_label_box);
+            expert_info_box.append(&separator);
+            expert_info_box.append(&active_label_box);
+
+            moe_box.append(&expert_info_box);
+
+            // Visual representation (simplified bar showing ratio)
+            let visual_box = GtkBox::new(Orientation::Vertical, 6);
+
+            let progress_bar_container = GtkBox::new(Orientation::Horizontal, 0);
+            progress_bar_container.set_hexpand(true);
+
+            let progress = gtk::ProgressBar::new();
+            // Clamp the fraction to valid range [0.0, 1.0]
+            let fraction = (active_experts as f64 / total_experts as f64).clamp(0.0, 1.0);
+            progress.set_fraction(fraction);
+            progress.set_show_text(false);
+            progress.set_hexpand(true);
+            progress_bar_container.append(&progress);
+
+            let ratio_label = gtk::Label::new(Some(&format!("{}/{} experts active", active_experts, total_experts)));
+            ratio_label.add_css_class("caption");
+            ratio_label.add_css_class("dim-label");
+            ratio_label.set_halign(gtk::Align::Center);
+
+            visual_box.append(&progress_bar_container);
+            visual_box.append(&ratio_label);
+
+            moe_box.append(&visual_box);
+
+            // Model size information
+            if let Some(size_label) = gguf_file.metadata.get_string("general.size_label") {
+                let size_info_box = GtkBox::new(Orientation::Vertical, 4);
+                size_info_box.set_margin_top(6);
+
+                // Calculate estimated active size
+                let file_size = gguf_file.file_size;
+                let estimated_active_size = calculate_active_expert_size(
+                    file_size,
+                    total_experts,
+                    active_experts,
+                );
+
+                let size_row = GtkBox::new(Orientation::Horizontal, 8);
+                size_row.set_halign(gtk::Align::Center);
+
+                let full_size_label = gtk::Label::new(Some(&format!("Full Model: {}", size_label)));
+                full_size_label.add_css_class("caption");
+
+                let dot_separator = gtk::Label::new(Some("•"));
+                dot_separator.add_css_class("caption");
+                dot_separator.add_css_class("dim-label");
+
+                let active_size_label = gtk::Label::new(Some(&format!(
+                    "Active: ~{}",
+                    format_bytes(estimated_active_size)
+                )));
+                active_size_label.add_css_class("caption");
+                active_size_label.add_css_class("accent");
+
+                size_row.append(&full_size_label);
+                size_row.append(&dot_separator);
+                size_row.append(&active_size_label);
+
+                size_info_box.append(&size_row);
+                moe_box.append(&size_info_box);
+            }
+
+            // Wrap in a frame for visual grouping
+            let frame = gtk::Frame::new(None);
+            frame.set_child(Some(&moe_box));
+
+            // Use ActionRow to embed the custom widget
+            let moe_container = adw::PreferencesGroup::builder()
+                .title("Mixture of Experts Configuration")
+                .margin_top(24)
+                .build();
+
+            moe_container.add(&frame);
+            content.append(&moe_container);
+        }
+    }
+}
+
+fn calculate_active_expert_size(total_size: u64, total_experts: u32, active_experts: u32) -> u64 {
+    // This is a rough estimation. In reality, MoE models have:
+    // - Shared parameters (embeddings, layer norms, output layer)
+    // - Expert-specific parameters (FFN layers)
+    // We estimate that ~70% of the model size is in expert-specific parameters
+    // and ~30% is shared across all experts
+
+    // Guard against division by zero
+    if total_experts == 0 {
+        return total_size;
+    }
+
+    let shared_portion = (total_size as f64 * 0.30) as u64;
+    let expert_portion = (total_size as f64 * 0.70) as u64;
+    let per_expert_size = expert_portion / total_experts as u64;
+    let active_expert_size = per_expert_size * active_experts as u64;
+
+    shared_portion + active_expert_size
 }
 
 fn format_file_type(file_type: u32) -> String {
