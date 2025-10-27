@@ -299,13 +299,26 @@ impl TensorPage {
         // Separator
         content.append(&gtk::Separator::new(Orientation::Horizontal));
 
-        // Heatmap visualization
+        // Visualization header with toggle button
+        let viz_header = GtkBox::new(Orientation::Horizontal, 8);
         let viz_label = gtk::Label::builder()
             .label("<b>Tensor Visualization</b>")
             .use_markup(true)
             .halign(gtk::Align::Start)
+            .hexpand(true)
             .build();
-        content.append(&viz_label);
+        viz_header.append(&viz_label);
+
+        // Toggle button for heatmap/histogram
+        let toggle_button = gtk::Button::builder()
+            .label("Histogram")
+            .halign(gtk::Align::End)
+            .css_classes(vec!["flat".to_string()])
+            .sensitive(false) // Disabled until data loads
+            .build();
+        viz_header.append(&toggle_button);
+
+        content.append(&viz_header);
 
         // Loading label (will be replaced by heatmap or error)
         let status_label = gtk::Label::builder()
@@ -318,14 +331,52 @@ impl TensorPage {
         heatmap_widget.widget().set_visible(false);
         content.append(heatmap_widget.widget());
 
+        // Statistics section (initially hidden)
+        let stats_separator = gtk::Separator::new(Orientation::Horizontal);
+        stats_separator.set_visible(false);
+        content.append(&stats_separator);
+
+        let stats_label = gtk::Label::builder()
+            .label("<b>Statistics</b>")
+            .use_markup(true)
+            .halign(gtk::Align::Start)
+            .visible(false)
+            .build();
+        content.append(&stats_label);
+
+        let stats_grid = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(6)
+            .visible(false)
+            .build();
+        content.append(&stats_grid);
+
         popover.set_child(Some(&content));
         popover.popup();
+
+        // Connect toggle button to switch visualization modes
+        let heatmap_for_toggle = heatmap_widget.clone();
+        let toggle_button_weak = toggle_button.downgrade();
+        toggle_button.connect_clicked(move |btn| {
+            heatmap_for_toggle.toggle_display_mode();
+            // Update button label
+            let current_label = btn.label().unwrap();
+            if current_label == "Histogram" {
+                btn.set_label("Heatmap");
+            } else {
+                btn.set_label("Histogram");
+            }
+        });
 
         // Load tensor data asynchronously to avoid blocking UI
         let tensor_clone = tensor.clone();
         let file_path_clone = file_path.to_path_buf();
         let heatmap_weak = heatmap_widget.clone();
         let status_weak = status_label.downgrade();
+        let stats_separator_weak = stats_separator.downgrade();
+        let stats_label_weak = stats_label.downgrade();
+        let stats_grid_weak = stats_grid.downgrade();
+        let toggle_btn_weak = toggle_button.downgrade();
 
         glib::spawn_future_local(async move {
             // Determine max elements based on model size
@@ -344,6 +395,50 @@ impl TensorPage {
                     heatmap_weak.widget().set_visible(true);
                     if let Some(label) = status_weak.upgrade() {
                         label.set_visible(false);
+                    }
+
+                    // Enable toggle button
+                    if let Some(btn) = toggle_btn_weak.upgrade() {
+                        btn.set_sensitive(true);
+                    }
+
+                    // Display statistics
+                    if let Some(stats) = heatmap_weak.get_statistics() {
+                        if let (Some(separator), Some(label), Some(grid)) = (
+                            stats_separator_weak.upgrade(),
+                            stats_label_weak.upgrade(),
+                            stats_grid_weak.upgrade()
+                        ) {
+                            separator.set_visible(true);
+                            label.set_visible(true);
+                            grid.set_visible(true);
+
+                            // Populate statistics grid
+                            let stats_data = [
+                                ("Mean:", format!("{:.6}", stats.mean)),
+                                ("Std Dev:", format!("{:.6}", stats.std_dev)),
+                                ("Min:", format!("{:.6}", stats.min)),
+                                ("Max:", format!("{:.6}", stats.max)),
+                                ("Median:", format!("{:.6}", stats.median)),
+                                ("Sparsity:", format!("{:.2}%", stats.sparsity)),
+                            ];
+
+                            for (row, (key, value)) in stats_data.iter().enumerate() {
+                                let key_label = gtk::Label::builder()
+                                    .label(*key)
+                                    .halign(gtk::Align::End)
+                                    .css_classes(vec!["dim-label".to_string()])
+                                    .build();
+                                let value_label = gtk::Label::builder()
+                                    .label(value)
+                                    .halign(gtk::Align::Start)
+                                    .selectable(true)
+                                    .build();
+
+                                grid.attach(&key_label, 0, row as i32, 1, 1);
+                                grid.attach(&value_label, 1, row as i32, 1, 1);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
