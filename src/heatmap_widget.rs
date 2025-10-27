@@ -778,11 +778,10 @@ fn draw_histogram(cr: &gtk::cairo::Context, width: i32, height: i32, data: &Heat
         let x = margin + i as f64 * bar_width;
         let y = margin + plot_height - bar_height;
 
-        // Color bars using memory visualizer palette (green-blue gradient)
-        let t = i as f64 / (num_bins - 1) as f64;
-        let (r, g, b) = memory_viz_color_gradient(t);
-
-        cr.set_source_rgba(r, g, b, 0.85);
+        // Use a single neutral color for histogram bars
+        // The histogram shows frequency distribution, not value magnitude
+        // Use a light blue-gray color that matches the dark theme
+        cr.set_source_rgba(0.45, 0.55, 0.65, 0.85);
         cr.rectangle(x, y, bar_width * 0.9, bar_height);
         cr.fill().unwrap();
     }
