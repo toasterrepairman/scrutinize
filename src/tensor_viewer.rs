@@ -44,7 +44,7 @@ impl TensorPage {
             .build();
 
         let memory_viz = DrawingArea::new();
-        memory_viz.set_content_height(160);
+        // Height will be set dynamically based on number of GPUs
         memory_viz.set_hexpand(true);
 
         let viz_frame = gtk::Frame::builder()
@@ -173,9 +173,31 @@ impl TensorPage {
             }
         }
 
+        // Calculate and set dynamic height based on system configuration
+        let height = calculate_visualization_height(&self.system_info.borrow());
+        self.memory_viz.set_content_height(height);
+
         // Trigger redraw of memory visualization
         self.memory_viz.queue_draw();
     }
+}
+
+fn calculate_visualization_height(system_info: &SystemMemoryInfo) -> i32 {
+    let margin = 12.0;
+    let bar_height = 52.0;
+    let spacing = 8.0;
+    let legend_height = 24.0; // Space for legend at bottom
+
+    // Calculate number of memory regions (GPUs + System RAM)
+    let num_regions = system_info.gpus.len() + 1; // +1 for System RAM
+
+    // Calculate total height needed
+    let total_height = margin // top margin
+        + (bar_height * num_regions as f64) // bars for each region
+        + (spacing * num_regions as f64) // spacing after each bar (including last one for legend)
+        + legend_height; // space for legend
+
+    total_height.ceil() as i32
 }
 
 fn get_system_memory_info() -> SystemMemoryInfo {
