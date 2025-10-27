@@ -243,10 +243,17 @@ impl TensorPage {
     fn show_tensor_popover(parent: &gtk::Widget, tensor: &TensorInfo, file_path: &std::path::Path) {
         use crate::heatmap_widget::HeatmapWidget;
 
+        // Ensure parent is realized before creating popover
+        if !parent.is_realized() {
+            parent.realize();
+        }
+
         let popover = gtk::Popover::new();
         popover.set_parent(parent);
         popover.set_position(gtk::PositionType::Bottom);
         popover.set_width_request(450);
+        popover.set_autohide(true);
+        popover.set_has_arrow(true);
 
         let content = GtkBox::new(Orientation::Vertical, 12);
         content.set_margin_top(12);
@@ -352,21 +359,13 @@ impl TensorPage {
         content.append(&stats_grid);
 
         popover.set_child(Some(&content));
-        popover.popup();
 
-        // Connect toggle button to switch visualization modes
-        let heatmap_for_toggle = heatmap_widget.clone();
-        let toggle_button_weak = toggle_button.downgrade();
-        toggle_button.connect_clicked(move |btn| {
-            heatmap_for_toggle.toggle_display_mode();
-            // Update button label
-            let current_label = btn.label().unwrap();
-            if current_label == "Histogram" {
-                btn.set_label("Heatmap");
-            } else {
-                btn.set_label("Histogram");
-            }
+        // Clean up popover when it's closed
+        popover.connect_closed(|popover| {
+            popover.unparent();
         });
+
+        popover.popup();
 
         // Load tensor data asynchronously to avoid blocking UI
         let tensor_clone = tensor.clone();
@@ -397,48 +396,22 @@ impl TensorPage {
                         label.set_visible(false);
                     }
 
-                    // Enable toggle button
+                    // Enable the toggle button now that data is loaded
                     if let Some(btn) = toggle_btn_weak.upgrade() {
                         btn.set_sensitive(true);
-                    }
 
-                    // Display statistics
-                    if let Some(stats) = heatmap_weak.get_statistics() {
-                        if let (Some(separator), Some(label), Some(grid)) = (
-                            stats_separator_weak.upgrade(),
-                            stats_label_weak.upgrade(),
-                            stats_grid_weak.upgrade()
-                        ) {
-                            separator.set_visible(true);
-                            label.set_visible(true);
-                            grid.set_visible(true);
-
-                            // Populate statistics grid
-                            let stats_data = [
-                                ("Mean:", format!("{:.6}", stats.mean)),
-                                ("Std Dev:", format!("{:.6}", stats.std_dev)),
-                                ("Min:", format!("{:.6}", stats.min)),
-                                ("Max:", format!("{:.6}", stats.max)),
-                                ("Median:", format!("{:.6}", stats.median)),
-                                ("Sparsity:", format!("{:.2}%", stats.sparsity)),
-                            ];
-
-                            for (row, (key, value)) in stats_data.iter().enumerate() {
-                                let key_label = gtk::Label::builder()
-                                    .label(*key)
-                                    .halign(gtk::Align::End)
-                                    .css_classes(vec!["dim-label".to_string()])
-                                    .build();
-                                let value_label = gtk::Label::builder()
-                                    .label(value)
-                                    .halign(gtk::Align::Start)
-                                    .selectable(true)
-                                    .build();
-
-                                grid.attach(&key_label, 0, row as i32, 1, 1);
-                                grid.attach(&value_label, 1, row as i32, 1, 1);
+                        // Connect click handler to toggle display mode
+                        let heatmap_for_toggle = heatmap_weak.clone();
+                        btn.connect_clicked(move |button| {
+                            heatmap_for_toggle.toggle_display_mode();
+                            // Update button label based on current mode
+                            let current_label = button.label().unwrap_or_default();
+                            if current_label == "Histogram" {
+                                button.set_label("Heatmap");
+                            } else {
+                                button.set_label("Histogram");
                             }
-                        }
+                        });
                     }
                 }
                 Err(e) => {
