@@ -12,10 +12,6 @@ use ui::window::GGUFWindow;
 const APP_ID: &str = "com.github.gguf_viewer";
 
 fn main() -> glib::ExitCode {
-    // Initialize GTK resources
-    gio::resources_register_include!("gguf_viewer.gresource")
-        .expect("Failed to register resources");
-
     // Create the application
     let app = adw::Application::builder()
         .application_id(APP_ID)
