@@ -26,7 +26,7 @@ impl GGUFWindow {
     pub fn new(app: &adw::Application) -> Self {
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("GGUF Viewer")
+            .title("Scrutinize")
             .default_width(500)
             .default_height(800)
             .build();
@@ -172,7 +172,7 @@ impl GGUFWindow {
                 let filename = path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("GGUF File");
-                self.window.set_title(Some(&format!("{} - GGUF Viewer", filename)));
+                self.window.set_title(Some(&format!("{} - Scrutinize", filename)));
 
                 // Build overview page
                 self.build_overview_page(&gguf_file);

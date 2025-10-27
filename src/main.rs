@@ -9,7 +9,7 @@ mod token_display;
 
 use ui::window::GGUFWindow;
 
-const APP_ID: &str = "com.github.gguf_viewer";
+const APP_ID: &str = "com.github.scrutinize";
 
 fn main() -> glib::ExitCode {
     // Create the application
@@ -23,7 +23,7 @@ fn main() -> glib::ExitCode {
 
         // Load CSS
         let provider = gtk::CssProvider::new();
-        provider.load_from_resource("/com/github/gguf_viewer/style.css");
+        provider.load_from_resource("/com/github/scrutinize/style.css");
 
         gtk::style_context_add_provider_for_display(
             &gtk::gdk::Display::default().expect("Could not connect to a display."),
