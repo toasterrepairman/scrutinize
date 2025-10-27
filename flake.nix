@@ -55,9 +55,12 @@
 
         cargoLock.lockFile = ./Cargo.lock;
 
-        postBuild = ''
-            # for desktop files
-            install -Dt $out/share/applications resources/scrutinize.desktop
+        postInstall = ''
+            # Install desktop file
+            install -Dm644 resources/scrutinize.desktop $out/share/applications/scrutinize.desktop
+
+            # Install MIME type definition
+            install -Dm644 resources/scrutinize-mimetypes.xml $out/share/mime/packages/scrutinize.xml
 
             # install -Dt $out/share/icons resources/icon-scrutinize.png
         '';

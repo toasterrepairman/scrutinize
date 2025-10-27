@@ -1,6 +1,6 @@
 [Desktop Entry]
 ##  The name of the application ##
-Name=scrutinize
+Name=Scrutinize
 GenericName=Inspect GGUF files
 
 ## A comment which act as a tooltip ##
@@ -19,3 +19,6 @@ Terminal=false
 
 ##  The type as listed  ##
 Type=Application
+
+## MIME types this application can handle ##
+MimeType=application/x-gguf;
