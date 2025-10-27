@@ -13,6 +13,7 @@ pub struct TensorPage {
     memory_viz: DrawingArea,
     tensors: Rc<RefCell<Vec<TensorInfo>>>,
     system_info: Rc<RefCell<SystemMemoryInfo>>,
+    file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,13 +65,18 @@ impl TensorPage {
             .build();
 
         let tensors = Rc::new(RefCell::new(Vec::new()));
+        let file_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
 
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection_model = gtk::NoSelection::new(Some(model.clone()));
 
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, list_item| {
-            let row = adw::ActionRow::builder().build();
+        let file_path_for_setup = Rc::clone(&file_path);
+
+        factory.connect_setup(move |_, list_item| {
+            let row = adw::ActionRow::builder()
+                .activatable(true)
+                .build();
 
             let type_label = gtk::Label::builder()
                 .margin_end(8)
@@ -78,16 +84,43 @@ impl TensorPage {
                 .build();
             row.add_suffix(&type_label);
 
+            // Add click gesture
+            let gesture = gtk::GestureClick::new();
+            let file_path_weak = Rc::downgrade(&file_path_for_setup);
+            gesture.connect_released(move |gesture, _, _, _| {
+                if let Some(row) = gesture.widget().and_downcast_ref::<adw::ActionRow>() {
+                    // Retrieve tensor data from object data
+                    unsafe {
+                        use glib::translate::ToGlibPtr;
+                        let tensor_ptr = glib::gobject_ffi::g_object_get_data(
+                            row.as_ptr() as *mut glib::gobject_ffi::GObject,
+                            b"tensor-data\0".as_ptr() as *const i8,
+                        );
+
+                        if !tensor_ptr.is_null() {
+                            let tensor = &*(tensor_ptr as *const TensorInfo);
+                            if let Some(file_path_rc) = file_path_weak.upgrade() {
+                                if let Some(ref path) = *file_path_rc.borrow() {
+                                    TensorPage::show_tensor_popover(row.upcast_ref::<gtk::Widget>(), tensor, path);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            row.add_controller(gesture);
+
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             list_item.set_child(Some(&row));
         });
 
+        let file_path_for_bind = Rc::clone(&file_path);
         factory.connect_bind(move |_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let item = list_item.item()
                 .and_downcast::<glib::BoxedAnyObject>()
                 .unwrap();
-            let tensor = item.borrow::<TensorInfo>();
+            let tensor = item.borrow::<TensorInfo>().clone();
 
             let row = list_item.child()
                 .and_downcast::<adw::ActionRow>()
@@ -100,16 +133,37 @@ impl TensorPage {
                 format_bytes(tensor.size_bytes));
             row.set_subtitle(&subtitle);
 
-            // Update type label
-            if let Some(type_label) = row.first_child() {
-                let mut current = Some(type_label);
-                while let Some(widget) = current {
-                    if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            // Update type label - find the suffix label
+            let mut suffix_widgets = Vec::new();
+            let mut current = row.first_child();
+            while let Some(widget) = current {
+                suffix_widgets.push(widget.clone());
+                current = widget.next_sibling();
+            }
+
+            // The type label should be a suffix
+            for widget in suffix_widgets {
+                if let Ok(label) = widget.downcast::<gtk::Label>() {
+                    if label.css_classes().iter().any(|c| c == "dim-label") {
                         label.set_text(tensor.dtype.name());
                         break;
                     }
-                    current = widget.next_sibling();
                 }
+            }
+
+            // Store tensor data in the row using object data
+            unsafe {
+                use glib::translate::ToGlibPtr;
+                let tensor_box = Box::new(tensor.clone());
+                let tensor_ptr = Box::into_raw(tensor_box) as glib::ffi::gpointer;
+                glib::gobject_ffi::g_object_set_data_full(
+                    row.as_ptr() as *mut glib::gobject_ffi::GObject,
+                    b"tensor-data\0".as_ptr() as *const i8,
+                    tensor_ptr,
+                    Some(std::mem::transmute::<_, unsafe extern "C" fn(glib::ffi::gpointer)>(
+                        free_tensor_data as *const ()
+                    )),
+                );
             }
         });
 
@@ -138,6 +192,7 @@ impl TensorPage {
             memory_viz: memory_viz.clone(),
             tensors: tensors.clone(),
             system_info: system_info.clone(),
+            file_path: file_path.clone(),
         };
 
         // Connect drawing
@@ -179,6 +234,126 @@ impl TensorPage {
 
         // Trigger redraw of memory visualization
         self.memory_viz.queue_draw();
+    }
+
+    pub fn set_file_path(&self, path: std::path::PathBuf) {
+        *self.file_path.borrow_mut() = Some(path);
+    }
+
+    fn show_tensor_popover(parent: &gtk::Widget, tensor: &TensorInfo, file_path: &std::path::Path) {
+        use crate::heatmap_widget::HeatmapWidget;
+
+        let popover = gtk::Popover::new();
+        popover.set_parent(parent);
+        popover.set_position(gtk::PositionType::Bottom);
+        popover.set_width_request(450);
+
+        let content = GtkBox::new(Orientation::Vertical, 12);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+
+        // Title
+        let title = gtk::Label::builder()
+            .label(&format!("<b>{}</b>", glib::markup_escape_text(&tensor.name)))
+            .use_markup(true)
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .build();
+        content.append(&title);
+
+        // Metadata grid
+        let meta_grid = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(6)
+            .build();
+
+        let labels = [
+            ("Shape:", tensor.shape_string()),
+            ("Type:", tensor.dtype.name().to_string()),
+            ("Elements:", format!("{}", tensor.element_count())),
+            ("Size:", format_bytes(tensor.size_bytes)),
+            ("Offset:", format!("0x{:X}", tensor.offset)),
+        ];
+
+        for (row, (key, value)) in labels.iter().enumerate() {
+            let key_label = gtk::Label::builder()
+                .label(*key)
+                .halign(gtk::Align::End)
+                .css_classes(vec!["dim-label".to_string()])
+                .build();
+            let value_label = gtk::Label::builder()
+                .label(value)
+                .halign(gtk::Align::Start)
+                .selectable(true)
+                .build();
+
+            meta_grid.attach(&key_label, 0, row as i32, 1, 1);
+            meta_grid.attach(&value_label, 1, row as i32, 1, 1);
+        }
+
+        content.append(&meta_grid);
+
+        // Separator
+        content.append(&gtk::Separator::new(Orientation::Horizontal));
+
+        // Heatmap visualization
+        let viz_label = gtk::Label::builder()
+            .label("<b>Tensor Visualization</b>")
+            .use_markup(true)
+            .halign(gtk::Align::Start)
+            .build();
+        content.append(&viz_label);
+
+        // Loading label (will be replaced by heatmap or error)
+        let status_label = gtk::Label::builder()
+            .label("Loading tensor data...")
+            .css_classes(vec!["dim-label".to_string()])
+            .build();
+        content.append(&status_label);
+
+        let heatmap_widget = HeatmapWidget::new();
+        heatmap_widget.widget().set_visible(false);
+        content.append(heatmap_widget.widget());
+
+        popover.set_child(Some(&content));
+        popover.popup();
+
+        // Load tensor data asynchronously to avoid blocking UI
+        let tensor_clone = tensor.clone();
+        let file_path_clone = file_path.to_path_buf();
+        let heatmap_weak = heatmap_widget.clone();
+        let status_weak = status_label.downgrade();
+
+        glib::spawn_future_local(async move {
+            // Determine max elements based on model size
+            // For large models (>20GB), use more aggressive quantization
+            let max_elements = if tensor_clone.size_bytes > 20 * 1024 * 1024 * 1024 {
+                512 * 256  // 131k elements max for very large models
+            } else if tensor_clone.size_bytes > 5 * 1024 * 1024 * 1024 {
+                1024 * 512  // 524k elements for large models
+            } else {
+                2048 * 1024  // 2M elements for smaller models
+            };
+
+            match tensor_clone.read_tensor_data(&file_path_clone, max_elements) {
+                Ok(data) => {
+                    heatmap_weak.set_data(data, &tensor_clone.dimensions);
+                    heatmap_weak.widget().set_visible(true);
+                    if let Some(label) = status_weak.upgrade() {
+                        label.set_visible(false);
+                    }
+                }
+                Err(e) => {
+                    if let Some(label) = status_weak.upgrade() {
+                        label.set_label(&format!("Error loading tensor: {}", e));
+                        label.add_css_class("error");
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -560,5 +735,12 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+// Callback for freeing tensor data stored in GObject data
+unsafe extern "C" fn free_tensor_data(data: glib::ffi::gpointer) {
+    if !data.is_null() {
+        let _ = Box::from_raw(data as *mut TensorInfo);
     }
 }

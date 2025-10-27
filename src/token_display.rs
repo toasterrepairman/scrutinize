@@ -165,7 +165,137 @@ impl TokenDisplay {
         );
         token_box.set_tooltip_text(Some(&tooltip_text));
 
+        // Add click handler for popover
+        let gesture = gtk::GestureClick::new();
+        let token_info_clone = token_info.clone();
+        gesture.connect_released(move |gesture, _, _, _| {
+            if let Some(widget) = gesture.widget() {
+                Self::show_token_popover(&widget, &token_info_clone);
+            }
+        });
+        token_box.add_controller(gesture);
+
+        // Make it clear it's clickable
+        token_box.set_cursor(gtk::gdk::Cursor::from_name("pointer", None).as_ref());
+
         token_box.upcast()
+    }
+
+    fn show_token_popover(parent: &gtk::Widget, token_info: &TokenInfo) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(parent);
+        popover.set_position(gtk::PositionType::Bottom);
+
+        let content = GtkBox::new(Orientation::Vertical, 12);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+
+        // Title
+        let title = gtk::Label::builder()
+            .label(&format!("<b>Token Details</b>"))
+            .use_markup(true)
+            .halign(gtk::Align::Start)
+            .build();
+        content.append(&title);
+
+        // Token representation
+        let escaped = escape_token(&token_info.token);
+        let token_group = GtkBox::new(Orientation::Vertical, 6);
+
+        let token_label = gtk::Label::builder()
+            .label(&format!("<tt>\"{}\"</tt>", glib::markup_escape_text(&escaped)))
+            .use_markup(true)
+            .selectable(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .halign(gtk::Align::Start)
+            .build();
+        token_group.append(&token_label);
+
+        // Byte representation
+        let bytes: Vec<String> = token_info.token.bytes()
+            .map(|b| format!("{:02X}", b))
+            .collect();
+        let bytes_label = gtk::Label::builder()
+            .label(&format!("<small>Bytes: {}</small>", glib::markup_escape_text(&bytes.join(" "))))
+            .use_markup(true)
+            .css_classes(vec!["dim-label".to_string()])
+            .halign(gtk::Align::Start)
+            .build();
+        token_group.append(&bytes_label);
+
+        content.append(&token_group);
+
+        // Separator
+        content.append(&gtk::Separator::new(Orientation::Horizontal));
+
+        // Metadata
+        let meta_grid = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(6)
+            .build();
+
+        let labels = [
+            ("Token ID:", format!("{}", token_info.id)),
+            ("Index:", format!("{}", token_info.index)),
+            ("Score:", format!("{:.6}", token_info.score)),
+            ("Type:", format_token_type(token_info.token_type).to_string()),
+            ("Length:", format!("{} bytes", token_info.token.len())),
+        ];
+
+        for (row, (key, value)) in labels.iter().enumerate() {
+            let key_label = gtk::Label::builder()
+                .label(*key)
+                .halign(gtk::Align::End)
+                .css_classes(vec!["dim-label".to_string()])
+                .build();
+            let value_label = gtk::Label::builder()
+                .label(value)
+                .halign(gtk::Align::Start)
+                .selectable(true)
+                .build();
+
+            meta_grid.attach(&key_label, 0, row as i32, 1, 1);
+            meta_grid.attach(&value_label, 1, row as i32, 1, 1);
+        }
+
+        content.append(&meta_grid);
+
+        // Character analysis
+        let char_count = token_info.token.chars().count();
+        if char_count > 0 {
+            content.append(&gtk::Separator::new(Orientation::Horizontal));
+
+            let char_box = GtkBox::new(Orientation::Vertical, 6);
+            let char_title = gtk::Label::builder()
+                .label("<small><b>Character Analysis</b></small>")
+                .use_markup(true)
+                .halign(gtk::Align::Start)
+                .build();
+            char_box.append(&char_title);
+
+            let char_info = if char_count == 1 {
+                let ch = token_info.token.chars().next().unwrap();
+                format!("Single character: U+{:04X}", ch as u32)
+            } else {
+                format!("{} characters, {} UTF-8 bytes", char_count, token_info.token.len())
+            };
+
+            let char_label = gtk::Label::builder()
+                .label(&format!("<small>{}</small>", glib::markup_escape_text(&char_info)))
+                .use_markup(true)
+                .css_classes(vec!["dim-label".to_string()])
+                .halign(gtk::Align::Start)
+                .build();
+            char_box.append(&char_label);
+
+            content.append(&char_box);
+        }
+
+        popover.set_child(Some(&content));
+        popover.popup();
     }
 
     pub fn set_summary(&self, _token_count: usize, _char_count: usize) {

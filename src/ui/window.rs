@@ -181,6 +181,7 @@ impl GGUFWindow {
                 self.tokenizer_page.load_tokenizer(&gguf_file);
 
                 // Update tensor page
+                self.tensor_page.set_file_path(path.to_path_buf());
                 self.tensor_page.load_tensors(&gguf_file);
             }
             Err(e) => {

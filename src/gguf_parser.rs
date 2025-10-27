@@ -282,6 +282,110 @@ impl TensorInfo {
             .collect::<Vec<_>>()
             .join(", "))
     }
+
+    /// Read tensor data from file, with optional quantization
+    /// Returns a downsampled vector of f32 values
+    pub fn read_tensor_data(&self, file_path: &Path, max_elements: usize) -> Result<Vec<f32>, String> {
+        use std::fs::File;
+        use std::io::{Seek, SeekFrom};
+
+        let mut file = File::open(file_path)
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+
+        file.seek(SeekFrom::Start(self.offset))
+            .map_err(|e| format!("Failed to seek to tensor offset: {}", e))?;
+
+        let element_count = self.element_count() as usize;
+
+        // Calculate stride for downsampling
+        let stride = if element_count > max_elements {
+            (element_count + max_elements - 1) / max_elements
+        } else {
+            1
+        };
+
+        let samples_to_read = (element_count + stride - 1) / stride;
+        let samples_to_read = samples_to_read.min(max_elements);
+
+        let mut result = Vec::with_capacity(samples_to_read);
+
+        // Read based on data type
+        // For quantized types, we'll do a simplified read (just sample bytes)
+        // For a production implementation, you'd want to properly dequantize
+        match self.dtype {
+            GGMLType::F32 => {
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64 * 4;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let value = read_f32(&mut file)?;
+                    result.push(value);
+                }
+            }
+            GGMLType::F16 => {
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64 * 2;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let value = read_f16(&mut file)?;
+                    result.push(value);
+                }
+            }
+            GGMLType::I8 => {
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let mut buf = [0u8; 1];
+                    file.read_exact(&mut buf)
+                        .map_err(|e| format!("Read failed: {}", e))?;
+                    result.push(buf[0] as i8 as f32);
+                }
+            }
+            GGMLType::I16 => {
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64 * 2;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let mut buf = [0u8; 2];
+                    file.read_exact(&mut buf)
+                        .map_err(|e| format!("Read failed: {}", e))?;
+                    result.push(i16::from_le_bytes(buf) as f32);
+                }
+            }
+            GGMLType::I32 => {
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64 * 4;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let value = read_i32(&mut file)?;
+                    result.push(value as f32);
+                }
+            }
+            // For quantized types, read raw bytes and normalize to -1..1 range
+            _ => {
+                let bytes_per_element = (self.size_bytes as f64 / element_count as f64).ceil() as usize;
+                for i in 0..samples_to_read {
+                    let offset_in_tensor = (i * stride) as u64 * bytes_per_element as u64;
+                    file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    let mut buf = [0u8; 1];
+                    file.read_exact(&mut buf)
+                        .map_err(|e| format!("Read failed: {}", e))?;
+                    // Normalize byte value to -1..1 range
+                    result.push((buf[0] as f32 - 128.0) / 128.0);
+                }
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 // Helper functions for reading binary data
@@ -311,6 +415,41 @@ fn read_f32<R: Read>(reader: &mut R) -> Result<f32, String> {
     reader.read_exact(&mut buf)
         .map_err(|e| format!("Failed to read f32: {}", e))?;
     Ok(f32::from_le_bytes(buf))
+}
+
+fn read_f16<R: Read>(reader: &mut R) -> Result<f32, String> {
+    let mut buf = [0u8; 2];
+    reader.read_exact(&mut buf)
+        .map_err(|e| format!("Failed to read f16: {}", e))?;
+    let bits = u16::from_le_bytes(buf);
+
+    // Convert f16 to f32
+    // Simple conversion without external crate
+    let sign = (bits >> 15) & 0x1;
+    let exp = (bits >> 10) & 0x1f;
+    let mantissa = bits & 0x3ff;
+
+    let value = if exp == 0 {
+        if mantissa == 0 {
+            0.0
+        } else {
+            // Subnormal
+            let mantissa_f = mantissa as f32 / 1024.0;
+            mantissa_f * 2.0f32.powi(-14)
+        }
+    } else if exp == 0x1f {
+        if mantissa == 0 {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        }
+    } else {
+        // Normalized
+        let mantissa_f = 1.0 + (mantissa as f32 / 1024.0);
+        mantissa_f * 2.0f32.powi(exp as i32 - 15)
+    };
+
+    Ok(if sign == 1 { -value } else { value })
 }
 
 fn read_string<R: Read>(reader: &mut R) -> Result<String, String> {
