@@ -184,17 +184,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gguf_viewer"
-version = "0.1.0"
-dependencies = [
- "gio",
- "glib",
- "glib-build-tools",
- "gtk4",
- "libadwaita",
-]
-
-[[package]]
 name = "gio"
 version = "0.20.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -544,6 +533,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "scrutinize"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "glib-build-tools",
+ "gtk4",
+ "libadwaita",
 ]
 
 [[package]]

@@ -197,8 +197,8 @@ impl GGUFWindow {
 
     fn build_overview_page(&self, gguf_file: &GGUFFile) {
         let content = GtkBox::new(Orientation::Vertical, 0);
-        content.set_margin_top(24);
-        content.set_margin_bottom(24);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
         content.set_margin_start(12);
         content.set_margin_end(12);
 
