@@ -1,7 +1,8 @@
 use gtk::prelude::*;
-use gtk::DrawingArea;
+use gtk::{DrawingArea, Box as GtkBox, Orientation, Scale};
 use std::cell::RefCell;
 use std::rc::Rc;
+use crate::tensor_slice::SliceSelection;
 
 /// Configuration for heatmap rendering
 const MAX_HEATMAP_DIMENSION: usize = 200; // Reduced for better performance
@@ -21,10 +22,15 @@ pub struct TensorStatistics {
 
 #[derive(Clone)]
 pub struct HeatmapWidget {
+    container: GtkBox,  // Main container (includes slice controls + drawing area)
     drawing_area: DrawingArea,
     data: Rc<RefCell<Option<HeatmapData>>>,
     display_mode: Rc<RefCell<DisplayMode>>,
     tooltip_label: gtk::Label,
+    slice_selection: Rc<RefCell<Option<SliceSelection>>>,
+    slice_controls: Rc<RefCell<Option<GtkBox>>>,  // Container for slice controls
+    on_slice_change: Rc<RefCell<Option<Box<dyn Fn(SliceSelection)>>>>,  // Callback when slice changes
+    active_selection: Rc<RefCell<Option<SliceSelection>>>,  // Keep the active selection alive for slider callbacks
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,12 +50,19 @@ struct HeatmapData {
 
 impl HeatmapWidget {
     pub fn new() -> Self {
+        // Create main container
+        let container = GtkBox::new(Orientation::Vertical, 8);
+
         let drawing_area = DrawingArea::new();
         drawing_area.set_content_width(400);
         drawing_area.set_content_height(400);
 
         let data = Rc::new(RefCell::new(None));
         let display_mode = Rc::new(RefCell::new(DisplayMode::Heatmap));
+        let slice_selection = Rc::new(RefCell::new(None));
+        let slice_controls = Rc::new(RefCell::new(None));
+        let on_slice_change: Rc<RefCell<Option<Box<dyn Fn(SliceSelection)>>>> = Rc::new(RefCell::new(None));
+        let active_selection = Rc::new(RefCell::new(None));
 
         let data_weak = Rc::downgrade(&data);
         let mode_weak = Rc::downgrade(&display_mode);
@@ -104,16 +117,164 @@ impl HeatmapWidget {
 
         drawing_area.add_controller(motion_controller);
 
+        // Add drawing area to container
+        container.append(&drawing_area);
+
         Self {
+            container,
             drawing_area,
             data,
             display_mode,
             tooltip_label,
+            slice_selection,
+            slice_controls,
+            on_slice_change,
+            active_selection,
         }
     }
 
-    pub fn widget(&self) -> &DrawingArea {
-        &self.drawing_area
+    /// Set a callback to be called when the slice selection changes
+    pub fn set_on_slice_change<F>(&self, callback: F)
+    where
+        F: Fn(SliceSelection) + 'static,
+    {
+        *self.on_slice_change.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn widget(&self) -> &GtkBox {
+        &self.container
+    }
+
+    /// Set the slice selection and update controls
+    pub fn set_slice_selection(&self, selection: Option<SliceSelection>) {
+        let needs_controls = selection.as_ref().map(|s| s.needs_slicing()).unwrap_or(false);
+
+        // Remove old controls if they exist
+        if let Some(old_controls) = self.slice_controls.borrow_mut().take() {
+            self.container.remove(&old_controls);
+        }
+
+        // Add new controls if needed
+        if needs_controls {
+            if let Some(ref sel) = selection {
+                let controls = self.create_slice_controls(sel.clone());
+                self.container.prepend(&controls);
+                *self.slice_controls.borrow_mut() = Some(controls);
+            }
+        }
+
+        *self.slice_selection.borrow_mut() = selection;
+    }
+
+    /// Create the UI controls for slice selection
+    fn create_slice_controls(&self, selection: SliceSelection) -> GtkBox {
+        let controls_box = GtkBox::new(Orientation::Vertical, 6);
+        controls_box.set_margin_start(8);
+        controls_box.set_margin_end(8);
+        controls_box.set_margin_top(8);
+        controls_box.set_margin_bottom(8);
+
+        // Add a label
+        let label = gtk::Label::new(Some("Slice Controls"));
+        label.set_halign(gtk::Align::Start);
+        label.add_css_class("heading");
+        controls_box.append(&label);
+
+        // Create a slider for each sliceable dimension
+        let sliceable = selection.sliceable_dimensions();
+
+        if sliceable.is_empty() {
+            let info = gtk::Label::new(Some("No sliceable dimensions"));
+            info.add_css_class("dim-label");
+            controls_box.append(&info);
+            return controls_box;
+        }
+
+        // Store the selection in the widget so it stays alive for slider callbacks
+        *self.active_selection.borrow_mut() = Some(selection.clone());
+
+        for (dim_idx, dim_name, dim_size, current_idx) in sliceable {
+            let row = GtkBox::new(Orientation::Horizontal, 12);
+
+            // Dimension label
+            let dim_label = gtk::Label::new(Some(&format!("{} ({}):", dim_name, dim_size)));
+            dim_label.set_width_chars(15);
+            dim_label.set_halign(gtk::Align::Start);
+            row.append(&dim_label);
+
+            // Slider
+            let slider = Scale::with_range(Orientation::Horizontal, 0.0, (dim_size - 1) as f64, 1.0);
+            slider.set_hexpand(true);
+            slider.set_draw_value(true);
+            slider.set_value_pos(gtk::PositionType::Right);
+            slider.set_digits(0);
+
+            // Value changed handler - must be connected BEFORE setting value
+            let active_sel_weak = Rc::downgrade(&self.active_selection);
+            let callback_weak = Rc::downgrade(&self.on_slice_change);
+            let slice_selection_weak = Rc::downgrade(&self.slice_selection);
+            let is_initializing = Rc::new(RefCell::new(true)); // Prevent callback during init
+            let init_flag = Rc::clone(&is_initializing);
+
+            slider.connect_value_changed(move |scale| {
+                // Skip callback if we're still initializing
+                if *init_flag.borrow() {
+                    return;
+                }
+
+                let new_idx = scale.value() as u64;
+                eprintln!("SLIDER CHANGED: dim={}, value={}", dim_idx, new_idx);
+
+                if let Some(active_sel_rc) = active_sel_weak.upgrade() {
+                    if let Some(ref mut sel) = *active_sel_rc.borrow_mut() {
+                        if sel.set_fixed_index(dim_idx, new_idx).is_ok() {
+                            eprintln!("  -> set_fixed_index OK");
+
+                            // Update the stored slice selection
+                            if let Some(sel_storage) = slice_selection_weak.upgrade() {
+                                *sel_storage.borrow_mut() = Some(sel.clone());
+                            }
+
+                            // Call the callback to reload data
+                            if let Some(callback_rc) = callback_weak.upgrade() {
+                                if let Some(ref callback) = *callback_rc.borrow() {
+                                    eprintln!("  -> Calling reload callback");
+                                    callback(sel.clone());
+                                } else {
+                                    eprintln!("  -> ERROR: Callback is None!");
+                                }
+                            } else {
+                                eprintln!("  -> ERROR: callback_weak upgrade failed!");
+                            }
+                        } else {
+                            eprintln!("  -> set_fixed_index FAILED");
+                        }
+                    } else {
+                        eprintln!("  -> ERROR: active_selection is None!");
+                    }
+                } else {
+                    eprintln!("  -> ERROR: active_sel_weak upgrade failed!");
+                }
+            });
+
+            // Now set the initial value (callback will be skipped due to is_initializing flag)
+            slider.set_value(current_idx as f64);
+
+            // Clear the initialization flag so future changes trigger the callback
+            *is_initializing.borrow_mut() = false;
+
+            row.append(&slider);
+            controls_box.append(&row);
+        }
+
+        // Add keyboard hint
+        let hint = gtk::Label::new(Some("Tip: Use arrow keys to navigate slices"));
+        hint.add_css_class("dim-label");
+        hint.set_halign(gtk::Align::Start);
+        hint.set_margin_top(4);
+        controls_box.append(&hint);
+
+        controls_box
     }
 
     /// Set the tensor data to visualize

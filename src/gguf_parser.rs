@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in ASCII
@@ -283,15 +283,147 @@ impl TensorInfo {
             .join(", "))
     }
 
-    /// Read tensor data from file, with optional quantization
+    /// Get the number of bytes per element for this tensor's data type
+    fn bytes_per_element(&self) -> u64 {
+        match self.dtype {
+            GGMLType::F32 | GGMLType::I32 => 4,
+            GGMLType::F16 | GGMLType::I16 => 2,
+            GGMLType::I8 => 1,
+            // For quantized types, approximate
+            _ => {
+                let element_count = self.element_count();
+                if element_count > 0 {
+                    (self.size_bytes + element_count - 1) / element_count
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    /// Read a single element from the file at the current position
+    fn read_single_element<R: Read>(&self, reader: &mut R) -> Result<f32, String> {
+        match self.dtype {
+            GGMLType::F32 => read_f32(reader),
+            GGMLType::F16 => read_f16(reader),
+            GGMLType::I8 => {
+                let mut buf = [0u8; 1];
+                reader.read_exact(&mut buf)
+                    .map_err(|e| format!("Read failed: {}", e))?;
+                Ok(buf[0] as i8 as f32)
+            }
+            GGMLType::I16 => {
+                let mut buf = [0u8; 2];
+                reader.read_exact(&mut buf)
+                    .map_err(|e| format!("Read failed: {}", e))?;
+                Ok(i16::from_le_bytes(buf) as f32)
+            }
+            GGMLType::I32 => {
+                let val = read_i32(reader)?;
+                Ok(val as f32)
+            }
+            // For quantized types, read raw byte and normalize
+            _ => {
+                let mut buf = [0u8; 1];
+                reader.read_exact(&mut buf)
+                    .map_err(|e| format!("Read failed: {}", e))?;
+                Ok((buf[0] as f32 - 128.0) / 128.0)
+            }
+        }
+    }
+
+    /// Read tensor data from file with optional slicing
     /// Returns a downsampled vector of f32 values
-    pub fn read_tensor_data(&self, file_path: &Path, max_elements: usize) -> Result<Vec<f32>, String> {
+    /// If slice_selection is None, reads the entire tensor (with downsampling)
+    /// If slice_selection is Some, only reads the specified 2D slice (much faster for large tensors)
+    pub fn read_tensor_data_with_slice(
+        &self,
+        file_path: &Path,
+        max_elements: usize,
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+    ) -> Result<Vec<f32>, String> {
         use std::fs::File;
         use std::io::{Seek, SeekFrom};
 
         let mut file = File::open(file_path)
             .map_err(|e| format!("Failed to open file: {}", e))?;
 
+        // If we have a slice selection, use the optimized path
+        if let Some(slice) = slice_selection {
+            return self.read_slice_optimized(&mut file, slice, max_elements);
+        }
+
+        // Fall back to reading entire tensor
+        self.read_entire_tensor(&mut file, max_elements)
+    }
+
+    /// Read only the specified 2D slice from a multi-dimensional tensor
+    /// This is much more efficient than reading the entire tensor
+    fn read_slice_optimized<R: Read + Seek>(
+        &self,
+        file: &mut R,
+        slice: &crate::tensor_slice::SliceSelection,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
+        let (slice_height, slice_width) = slice.slice_shape();
+        let slice_elements = (slice_height * slice_width) as usize;
+
+        // Calculate downsampling if needed
+        let stride = if slice_elements > max_elements {
+            (slice_elements + max_elements - 1) / max_elements
+        } else {
+            1
+        };
+
+        let samples_to_read = (slice_elements + stride - 1) / stride;
+        let samples_to_read = samples_to_read.min(max_elements);
+        let mut result = Vec::with_capacity(samples_to_read);
+
+        let bytes_per_element = self.bytes_per_element();
+
+        // Read elements by computing their linear offsets
+        let mut samples_read = 0;
+        for row in 0..slice_height {
+            for col in 0..slice_width {
+                // Apply downsampling
+                let linear_idx = row * slice_width + col;
+                if linear_idx as usize % stride != 0 {
+                    continue;
+                }
+
+                if samples_read >= samples_to_read {
+                    break;
+                }
+
+                // Get the linear offset in the full tensor
+                let offset = slice.linear_offset(row, col)
+                    .ok_or("Invalid slice offset")?;
+
+                // Seek to this element
+                let file_offset = self.offset + offset * bytes_per_element;
+                file.seek(SeekFrom::Start(file_offset))
+                    .map_err(|e| format!("Seek failed: {}", e))?;
+
+                // Read the value
+                let value = self.read_single_element(file)?;
+                result.push(value);
+                samples_read += 1;
+            }
+
+            if samples_read >= samples_to_read {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Read the entire tensor (existing behavior, now refactored)
+    fn read_entire_tensor<R: Read + Seek>(
+        &self,
+        file: &mut R,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
         file.seek(SeekFrom::Start(self.offset))
             .map_err(|e| format!("Failed to seek to tensor offset: {}", e))?;
 
@@ -319,7 +451,7 @@ impl TensorInfo {
                     file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
                         .map_err(|e| format!("Seek failed: {}", e))?;
 
-                    let value = read_f32(&mut file)?;
+                    let value = read_f32(file)?;
                     result.push(value);
                 }
             }
@@ -329,7 +461,7 @@ impl TensorInfo {
                     file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
                         .map_err(|e| format!("Seek failed: {}", e))?;
 
-                    let value = read_f16(&mut file)?;
+                    let value = read_f16(file)?;
                     result.push(value);
                 }
             }
@@ -363,7 +495,7 @@ impl TensorInfo {
                     file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
                         .map_err(|e| format!("Seek failed: {}", e))?;
 
-                    let value = read_i32(&mut file)?;
+                    let value = read_i32(file)?;
                     result.push(value as f32);
                 }
             }
@@ -385,6 +517,13 @@ impl TensorInfo {
         }
 
         Ok(result)
+    }
+
+    /// Read tensor data from file, with optional quantization
+    /// Returns a downsampled vector of f32 values
+    /// This is the original method, maintained for backward compatibility
+    pub fn read_tensor_data(&self, file_path: &Path, max_elements: usize) -> Result<Vec<f32>, String> {
+        self.read_tensor_data_with_slice(file_path, max_elements, None)
     }
 }
 

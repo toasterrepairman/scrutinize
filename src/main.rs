@@ -8,6 +8,7 @@ mod tensor_viewer;
 mod token_display;
 mod heatmap_widget;
 mod optimized_tokenizer;
+mod tensor_slice;
 
 use ui::window::GGUFWindow;
 

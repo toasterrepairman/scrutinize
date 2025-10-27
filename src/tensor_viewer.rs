@@ -378,6 +378,8 @@ impl TensorPage {
         let toggle_btn_weak = toggle_button.downgrade();
 
         glib::spawn_future_local(async move {
+            use crate::tensor_slice::SliceSelection;
+
             // Determine max elements based on model size
             // For large models (>20GB), use more aggressive quantization
             let max_elements = if tensor_clone.size_bytes > 20 * 1024 * 1024 * 1024 {
@@ -388,9 +390,67 @@ impl TensorPage {
                 2048 * 1024  // 2M elements for smaller models
             };
 
-            match tensor_clone.read_tensor_data(&file_path_clone, max_elements) {
+            // Create smart slice selection for 3D+ tensors
+            let slice_selection = if tensor_clone.dimensions.len() > 2 {
+                let sel = SliceSelection::smart_default(&tensor_clone.name, tensor_clone.dimensions.clone());
+                eprintln!("Created slice selection for {}: shape={:?}, needs_slicing={}",
+                    tensor_clone.name, tensor_clone.dimensions, sel.needs_slicing());
+                Some(sel)
+            } else {
+                eprintln!("Tensor {} is 2D or less (shape={:?}), no slice selection needed",
+                    tensor_clone.name, tensor_clone.dimensions);
+                None
+            };
+
+            // Set slice selection in heatmap widget (this shows the controls)
+            eprintln!("Setting slice selection on heatmap widget...");
+            heatmap_weak.set_slice_selection(slice_selection.clone());
+            eprintln!("Slice selection set successfully");
+
+            // Set up callback to reload data when slice changes
+            let tensor_for_callback = tensor_clone.clone();
+            let file_path_for_callback = file_path_clone.clone();
+            let heatmap_for_callback = heatmap_weak.clone();
+            heatmap_weak.set_on_slice_change(move |new_selection| {
+                eprintln!("Slice changed, reloading data...");
+                let tensor = tensor_for_callback.clone();
+                let path = file_path_for_callback.clone();
+                let heatmap = heatmap_for_callback.clone();
+
+                // Spawn async task to reload data
+                glib::spawn_future_local(async move {
+                    let max_elements = if tensor.size_bytes > 20 * 1024 * 1024 * 1024 {
+                        512 * 256
+                    } else if tensor.size_bytes > 5 * 1024 * 1024 * 1024 {
+                        1024 * 512
+                    } else {
+                        2048 * 1024
+                    };
+
+                    match tensor.read_tensor_data_with_slice(&path, max_elements, Some(&new_selection)) {
+                        Ok(data) => {
+                            let (h, w) = new_selection.slice_shape();
+                            heatmap.set_data(data, &vec![h, w]);
+                            eprintln!("Data reloaded successfully for new slice");
+                        }
+                        Err(e) => {
+                            eprintln!("Error reloading slice data: {}", e);
+                        }
+                    }
+                });
+            });
+
+            match tensor_clone.read_tensor_data_with_slice(&file_path_clone, max_elements, slice_selection.as_ref()) {
                 Ok(data) => {
-                    heatmap_weak.set_data(data, &tensor_clone.dimensions);
+                    // Get the shape to display based on slice selection
+                    let display_shape = if let Some(ref sel) = slice_selection {
+                        let (h, w) = sel.slice_shape();
+                        vec![h, w]
+                    } else {
+                        tensor_clone.dimensions.clone()
+                    };
+
+                    heatmap_weak.set_data(data, &display_shape);
                     heatmap_weak.widget().set_visible(true);
                     if let Some(label) = status_weak.upgrade() {
                         label.set_visible(false);
