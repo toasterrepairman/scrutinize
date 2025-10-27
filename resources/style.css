@@ -1,0 +1,58 @@
+/* Token type color coding */
+.token-normal {
+    background-color: alpha(@accent_bg_color, 0.15);
+    border-left: 3px solid @accent_bg_color;
+}
+
+.token-unknown {
+    background-color: alpha(@warning_bg_color, 0.15);
+    border-left: 3px solid @warning_bg_color;
+}
+
+.token-control {
+    background-color: alpha(@error_bg_color, 0.15);
+    border-left: 3px solid @error_bg_color;
+}
+
+.token-user {
+    background-color: alpha(@success_bg_color, 0.15);
+    border-left: 3px solid @success_bg_color;
+}
+
+.token-unused {
+    background-color: alpha(@window_bg_color, 0.15);
+    border-left: 3px solid alpha(@window_fg_color, 0.3);
+}
+
+.token-byte {
+    background-color: alpha(@purple_3, 0.15);
+    border-left: 3px solid @purple_3;
+}
+
+.token-other {
+    background-color: alpha(@window_bg_color, 0.15);
+    border-left: 3px solid alpha(@window_fg_color, 0.5);
+}
+
+/* Additional styling for token widgets */
+.token-normal,
+.token-unknown,
+.token-control,
+.token-user,
+.token-unused,
+.token-byte,
+.token-other {
+    border-radius: 6px;
+    transition: all 200ms ease-in-out;
+}
+
+.token-normal:hover,
+.token-unknown:hover,
+.token-control:hover,
+.token-user:hover,
+.token-unused:hover,
+.token-byte:hover,
+.token-other:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    transform: translateY(-1px);
+}
