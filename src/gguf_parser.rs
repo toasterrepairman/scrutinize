@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in ASCII
@@ -345,20 +345,24 @@ impl TensorInfo {
         use std::fs::File;
         use std::io::{Seek, SeekFrom};
 
-        let mut file = File::open(file_path)
+        let file = File::open(file_path)
             .map_err(|e| format!("Failed to open file: {}", e))?;
+
+        // Use buffered reader for significantly faster I/O
+        let mut buffered_file = BufReader::with_capacity(256 * 1024, file); // 256KB buffer
 
         // If we have a slice selection, use the optimized path
         if let Some(slice) = slice_selection {
-            return self.read_slice_optimized(&mut file, slice, max_elements);
+            return self.read_slice_optimized(&mut buffered_file, slice, max_elements);
         }
 
         // Fall back to reading entire tensor
-        self.read_entire_tensor(&mut file, max_elements)
+        self.read_entire_tensor(&mut buffered_file, max_elements)
     }
 
     /// Read only the specified 2D slice from a multi-dimensional tensor
     /// This is much more efficient than reading the entire tensor
+    /// OPTIMIZED: Reads rows in chunks to minimize seeks
     fn read_slice_optimized<R: Read + Seek>(
         &self,
         file: &mut R,
@@ -369,49 +373,49 @@ impl TensorInfo {
         let slice_elements = (slice_height * slice_width) as usize;
 
         // Calculate downsampling if needed
-        let stride = if slice_elements > max_elements {
-            (slice_elements + max_elements - 1) / max_elements
+        let row_stride = if slice_elements > max_elements {
+            let total_stride = (slice_elements + max_elements - 1) / max_elements;
+            total_stride.max(1)
         } else {
             1
         };
 
-        let samples_to_read = (slice_elements + stride - 1) / stride;
-        let samples_to_read = samples_to_read.min(max_elements);
-        let mut result = Vec::with_capacity(samples_to_read);
+        let col_stride = 1; // Read full rows, then downsample
+        let rows_to_read = (slice_height as usize + row_stride - 1) / row_stride;
+        let samples_per_row = slice_width as usize;
+
+        let mut result = Vec::new();
+        result.reserve(rows_to_read * samples_per_row / row_stride);
 
         let bytes_per_element = self.bytes_per_element();
 
-        // Read elements by computing their linear offsets
-        let mut samples_read = 0;
-        for row in 0..slice_height {
-            for col in 0..slice_width {
-                // Apply downsampling
-                let linear_idx = row * slice_width + col;
-                if linear_idx as usize % stride != 0 {
-                    continue;
-                }
+        // Optimization: Read entire rows at once to minimize seeks
+        // This reduces seeks from O(n*m) to O(n) for an nxm slice
+        for row_idx in (0..slice_height as usize).step_by(row_stride) {
+            let row = row_idx as u64;
 
-                if samples_read >= samples_to_read {
-                    break;
-                }
+            // Get offset to start of this row
+            let row_start_offset = slice.linear_offset(row, 0)
+                .ok_or("Invalid slice offset")?;
+            let file_offset = self.offset + row_start_offset * bytes_per_element;
 
-                // Get the linear offset in the full tensor
-                let offset = slice.linear_offset(row, col)
-                    .ok_or("Invalid slice offset")?;
+            // Seek once per row
+            file.seek(SeekFrom::Start(file_offset))
+                .map_err(|e| format!("Seek failed: {}", e))?;
 
-                // Seek to this element
-                let file_offset = self.offset + offset * bytes_per_element;
-                file.seek(SeekFrom::Start(file_offset))
-                    .map_err(|e| format!("Seek failed: {}", e))?;
+            // Read entire row into buffer
+            let row_bytes = (slice_width * bytes_per_element) as usize;
+            let mut row_buffer = vec![0u8; row_bytes];
+            file.read_exact(&mut row_buffer)
+                .map_err(|e| format!("Read failed: {}", e))?;
 
-                // Read the value
-                let value = self.read_single_element(file)?;
+            // Parse values from buffer (no more I/O here)
+            let mut cursor = std::io::Cursor::new(&row_buffer);
+            for col in (0..slice_width as usize).step_by(col_stride) {
+                // Seek within the in-memory buffer (fast)
+                cursor.set_position((col as u64) * bytes_per_element);
+                let value = self.read_single_element(&mut cursor)?;
                 result.push(value);
-                samples_read += 1;
-            }
-
-            if samples_read >= samples_to_read {
-                break;
             }
         }
 

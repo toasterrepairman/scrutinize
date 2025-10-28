@@ -455,33 +455,96 @@ fn draw_heatmap(cr: &gtk::cairo::Context, width: i32, height: i32, data: &Heatma
 
     let value_range = (data.max_value - data.min_value).max(0.0001);
 
-    // Draw each cell
-    for y in 0..data.height {
-        for x in 0..data.width {
-            let idx = y * data.width + x;
-            if idx >= data.values.len() {
-                continue;
+    // OPTIMIZATION: Use ImageSurface for much faster rendering
+    // Instead of drawing 65k rectangles, we create a bitmap and scale it
+    if let Ok(mut surface) = gtk::cairo::ImageSurface::create(
+        gtk::cairo::Format::Rgb24,
+        data.width as i32,
+        data.height as i32,
+    ) {
+        // Get direct access to pixel buffer
+        let stride = surface.stride() as usize;
+        let mut surface_data = surface.data().unwrap();
+
+        // Write pixels directly to the surface (much faster than cairo drawing)
+        for y in 0..data.height {
+            for x in 0..data.width {
+                let idx = y * data.width + x;
+                if idx >= data.values.len() {
+                    continue;
+                }
+
+                let value = data.values[idx];
+                if !value.is_finite() {
+                    continue;
+                }
+
+                // Normalize value to 0-1 range
+                let normalized = ((value - data.min_value) / value_range).clamp(0.0, 1.0);
+
+                // Apply color mapping
+                let (r, g, b) = memory_viz_color_gradient(normalized as f64);
+
+                // Convert to 8-bit RGB
+                let r8 = (r * 255.0) as u8;
+                let g8 = (g * 255.0) as u8;
+                let b8 = (b * 255.0) as u8;
+
+                // Cairo ImageSurface uses BGRA format on little-endian systems
+                let pixel_offset = y * stride + x * 4;
+                if pixel_offset + 2 < surface_data.len() {
+                    surface_data[pixel_offset] = b8;
+                    surface_data[pixel_offset + 1] = g8;
+                    surface_data[pixel_offset + 2] = r8;
+                    // Alpha is ignored for RGB24
+                }
             }
+        }
 
-            let value = data.values[idx];
-            if !value.is_finite() {
-                continue;
+        drop(surface_data); // Release borrow before using surface
+
+        // Scale and draw the image surface
+        cr.save().unwrap();
+        cr.scale(cell_width, cell_height);
+        cr.set_source_surface(&surface, 0.0, 0.0).unwrap();
+
+        // Use nearest-neighbor filtering for sharp pixels when zoomed in
+        // Use bilinear when scaling down
+        let pattern = cr.source();
+        if cell_width >= 1.0 && cell_height >= 1.0 {
+            pattern.set_filter(gtk::cairo::Filter::Nearest);
+        } else {
+            pattern.set_filter(gtk::cairo::Filter::Best);
+        }
+
+        cr.paint().unwrap();
+        cr.restore().unwrap();
+    } else {
+        // Fallback to slow rectangle drawing if ImageSurface creation fails
+        for y in 0..data.height {
+            for x in 0..data.width {
+                let idx = y * data.width + x;
+                if idx >= data.values.len() {
+                    continue;
+                }
+
+                let value = data.values[idx];
+                if !value.is_finite() {
+                    continue;
+                }
+
+                let normalized = ((value - data.min_value) / value_range).clamp(0.0, 1.0);
+                let (r, g, b) = memory_viz_color_gradient(normalized as f64);
+
+                cr.set_source_rgb(r, g, b);
+                cr.rectangle(
+                    x as f64 * cell_width,
+                    y as f64 * cell_height,
+                    cell_width,
+                    cell_height,
+                );
+                cr.fill().unwrap();
             }
-
-            // Normalize value to 0-1 range
-            let normalized = ((value - data.min_value) / value_range).clamp(0.0, 1.0);
-
-            // Apply color mapping using memory visualizer gradient (green -> blue)
-            let (r, g, b) = memory_viz_color_gradient(normalized as f64);
-
-            cr.set_source_rgb(r, g, b);
-            cr.rectangle(
-                x as f64 * cell_width,
-                y as f64 * cell_height,
-                cell_width,
-                cell_height,
-            );
-            cr.fill().unwrap();
         }
     }
 
@@ -613,7 +676,7 @@ fn draw_colormap_legend(cr: &gtk::cairo::Context, width: f64, y_offset: f64, leg
     cr.show_text(&max_text).unwrap();
 }
 
-/// Compute comprehensive statistics for tensor values (optimized)
+/// Compute comprehensive statistics for tensor values (optimized, single-pass)
 fn compute_statistics(values: &[f32]) -> TensorStatistics {
     if values.is_empty() {
         return TensorStatistics {
@@ -626,15 +689,18 @@ fn compute_statistics(values: &[f32]) -> TensorStatistics {
         };
     }
 
-    // Single-pass statistics computation (no intermediate Vec allocation)
-    let mut sum = 0.0f32;
+    // OPTIMIZATION: Combined single-pass computation for mean, min, max, and sparsity prep
+    let mut sum = 0.0f64;  // Use f64 for better numerical stability
+    let mut sum_sq = 0.0f64;  // Sum of squares for variance in single pass
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
     let mut count = 0usize;
 
     for &value in values {
         if value.is_finite() {
-            sum += value;
+            let v64 = value as f64;
+            sum += v64;
+            sum_sq += v64 * v64;
             min = min.min(value);
             max = max.max(value);
             count += 1;
@@ -652,31 +718,36 @@ fn compute_statistics(values: &[f32]) -> TensorStatistics {
         };
     }
 
-    let mean = sum / count as f32;
+    let mean = (sum / count as f64) as f32;
 
-    // Second pass for variance and sparsity
-    let mut variance = 0.0f32;
-    let mut near_zero_count = 0usize;
+    // Calculate variance using the computational formula: Var(X) = E[X²] - E[X]²
+    // This avoids a second pass through the data
+    let mean_sq = sum_sq / count as f64;
+    let variance = (mean_sq - (mean as f64).powi(2)).max(0.0);  // max(0) handles floating point errors
+    let std_dev = variance.sqrt() as f32;
+
+    // OPTIMIZATION: Sparsity computation - only for datasets where it's meaningful
     let threshold = max.abs().max(min.abs()) * 0.001;
+    let mut near_zero_count = 0usize;
 
-    for &value in values {
-        if value.is_finite() {
-            let diff = value - mean;
-            variance += diff * diff;
-
-            if value.abs() < threshold {
+    // Skip sparsity computation for very small datasets
+    if count > 100 {
+        for &value in values {
+            if value.is_finite() && value.abs() < threshold {
                 near_zero_count += 1;
             }
         }
     }
-
-    let std_dev = (variance / count as f32).sqrt();
     let sparsity = (near_zero_count as f32 / count as f32) * 100.0;
 
-    // Optimized median computation - use sampling for large arrays
-    let median = if count > 10000 {
-        // Sample-based approximation for large tensors (avoids sorting overhead)
-        let sample_size = 1000.min(count);
+    // OPTIMIZATION: Skip median for very large datasets (it's expensive and rarely useful)
+    let median = if count > 50000 {
+        // For very large tensors, median computation is too expensive
+        // Use mean as approximation
+        mean
+    } else if count > 10000 {
+        // Sample-based approximation for large tensors
+        let sample_size = 1000;
         let step = count / sample_size;
         let mut sample: Vec<f32> = values.iter()
             .copied()
@@ -701,7 +772,7 @@ fn compute_statistics(values: &[f32]) -> TensorStatistics {
 
         if !sorted.is_empty() {
             let mid = sorted.len() / 2;
-            if sorted.len() % 2 == 0 {
+            if sorted.len() % 2 == 0 && mid > 0 {
                 sorted.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
                 (sorted[mid - 1] + sorted[mid]) / 2.0
             } else {
