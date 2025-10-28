@@ -11,14 +11,3 @@ glib = "0.20"
 
 [build-dependencies]
 glib-build-tools = "0.20"
-
-# Optimizations for release builds
-[profile.release]
-opt-level = 3           # Maximum optimization
-lto = "thin"           # Thin Link-Time Optimization (good balance of speed vs compile time)
-codegen-units = 1      # Better optimization (slower compile, faster runtime)
-strip = true           # Strip symbols to reduce binary size
-
-# Fast development builds with some optimization
-[profile.dev]
-opt-level = 1          # Basic optimization for bearable debug performance

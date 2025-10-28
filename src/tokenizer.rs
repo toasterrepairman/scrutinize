@@ -31,7 +31,7 @@ struct TokenData {
 
 impl TokenizerPage {
     pub fn new() -> Self {
-        // Use a paned layout - will be vertical by default, horizontal in landscape
+        // Use a paned layout with token tester on top and vocabulary below
         let paned = gtk::Paned::builder()
             .orientation(Orientation::Vertical)
             .shrink_start_child(false)
@@ -236,40 +236,11 @@ impl TokenizerPage {
         // Add both sections to paned
         paned.set_start_child(Some(&tester_box));
         paned.set_end_child(Some(&vocab_box));
-        paned.set_position(480); // Give more space to tester, less to vocabulary
+        paned.set_position(360); // Give more space to tester initially
 
         // Wrap in bin
         let widget = adw::Bin::new();
         widget.set_child(Some(&paned));
-
-        // Set up responsive layout: horizontal split in landscape mode
-        let paned_weak = paned.downgrade();
-
-        // Use a tick callback to check for size changes
-        widget.add_tick_callback(move |widget, _clock| {
-            if let Some(paned) = paned_weak.upgrade() {
-                let width = widget.width();
-                let height = widget.height();
-
-                // Only respond if we have valid dimensions
-                if width > 0 && height > 0 {
-                    let is_landscape = width > height;
-                    let current_orientation = paned.orientation();
-
-                    // Switch to horizontal in landscape, vertical in portrait
-                    if is_landscape && current_orientation == Orientation::Vertical {
-                        paned.set_orientation(Orientation::Horizontal);
-                        // Set position to give tester ~60% of width
-                        paned.set_position((width as f64 * 0.6) as i32);
-                    } else if !is_landscape && current_orientation == Orientation::Horizontal {
-                        paned.set_orientation(Orientation::Vertical);
-                        // Set position to give tester ~480px height
-                        paned.set_position(480);
-                    }
-                }
-            }
-            glib::ControlFlow::Continue
-        });
 
         let page = Self {
             widget,
