@@ -31,7 +31,8 @@ struct TokenData {
 
 impl TokenizerPage {
     pub fn new() -> Self {
-        // Use a paned layout with token tester on top and vocabulary below
+        // Use a paned layout with token tester on top/left and vocabulary below/right
+        // Initial orientation is vertical, will switch based on window width
         let paned = gtk::Paned::builder()
             .orientation(Orientation::Vertical)
             .shrink_start_child(false)
@@ -236,11 +237,43 @@ impl TokenizerPage {
         // Add both sections to paned
         paned.set_start_child(Some(&tester_box));
         paned.set_end_child(Some(&vocab_box));
-        paned.set_position(360); // Give more space to tester initially
+        paned.set_position(500); // Initial position - will be adjusted based on orientation
 
         // Wrap in bin
         let widget = adw::Bin::new();
         widget.set_child(Some(&paned));
+
+        // Use a tick callback to monitor size changes and adjust orientation
+        let last_size = Rc::new(RefCell::new((0, 0)));
+
+        paned.add_tick_callback(move |paned, _clock| {
+            let width = paned.width();
+            let height = paned.height();
+
+            // Only update if size actually changed
+            let mut last = last_size.borrow_mut();
+            if width > 0 && height > 0 && (width != last.0 || height != last.1) {
+                *last = (width, height);
+                drop(last); // Release borrow before potentially modifying paned
+
+                let is_landscape = width > height && width > 700;
+                let current_orientation = paned.orientation();
+
+                if is_landscape && current_orientation == Orientation::Vertical {
+                    // Switch to horizontal (side-by-side)
+                    paned.set_orientation(Orientation::Horizontal);
+                    // Give more space to tester (left side)
+                    paned.set_position((width as f64 * 0.6) as i32);
+                } else if !is_landscape && current_orientation == Orientation::Horizontal {
+                    // Switch to vertical (stacked)
+                    paned.set_orientation(Orientation::Vertical);
+                    // Give less space to vocab (bottom)
+                    paned.set_position((height as f64 * 0.65) as i32);
+                }
+            }
+
+            glib::ControlFlow::Continue
+        });
 
         let page = Self {
             widget,
