@@ -65,6 +65,7 @@ pub enum GGMLType {
     I8 = 16,
     I16 = 17,
     I32 = 18,
+    MXFP4 = 39,
 }
 
 impl GGMLType {
@@ -87,6 +88,7 @@ impl GGMLType {
             16 => Ok(GGMLType::I8),
             17 => Ok(GGMLType::I16),
             18 => Ok(GGMLType::I32),
+            39 => Ok(GGMLType::MXFP4),
             _ => Err(format!("Unknown GGML type: {}", value)),
         }
     }
@@ -104,6 +106,7 @@ impl GGMLType {
             GGMLType::Q5_K => 5.5,
             GGMLType::Q6_K => 6.5625,
             GGMLType::Q8_K => 8.5,
+            GGMLType::MXFP4 => 4.0,  // Microscaling FP4: 4 bits per weight
         }
     }
 
@@ -126,6 +129,7 @@ impl GGMLType {
             GGMLType::I8 => "I8",
             GGMLType::I16 => "I16",
             GGMLType::I32 => "I32",
+            GGMLType::MXFP4 => "MXFP4",
         }
     }
 }
