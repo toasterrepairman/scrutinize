@@ -57,7 +57,7 @@
 
         postInstall = ''
             # Install desktop file
-            install -Dm644 resources/scrutinize.desktop $out/share/applications/scrutinize.desktop
+            install -Dm644 resources/com.github.scrutinize.desktop $out/share/applications/com.github.scrutinize.desktop
 
             # Install MIME type definition
             install -Dm644 resources/scrutinize-mimetypes.xml $out/share/mime/packages/scrutinize.xml
