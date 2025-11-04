@@ -708,12 +708,15 @@ fn draw_memory_visualization(
             cr.fill().unwrap();
         }
 
-        // Draw text labels
+        // Draw text labels (responsive to container width)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
         cr.set_font_size(10.5);
 
+        // Determine available horizontal space for text
+        let available_text_width = width - 2.0 * margin - 2.0 * bar_margin;
+
         // Device name (top left) with available memory
-        let name_text = if model_allocated > 0 && available_after > model_allocated {
+        let name_text = if model_allocated > 0 && available_after > model_allocated && available_text_width > 400.0 {
             format!("{} • {} available", region.name, format_bytes(available_after - model_allocated))
         } else {
             region.name.clone()
@@ -721,21 +724,38 @@ fn draw_memory_visualization(
         cr.move_to(margin + bar_margin, region.y_pos + 16.0);
         cr.show_text(&name_text).unwrap();
 
-        // Memory stats (top right)
+        // Memory stats (top right) - adapt based on available space
         cr.set_font_size(10.0);
-        let stats_text = if model_allocated > 0 {
-            format!("{} + {} / {} ({:.0}%)",
-                format_bytes(region.used),
-                format_bytes(model_allocated),
-                format_bytes(region.capacity),
-                total_fill_ratio * 100.0
-            )
+        let stats_text = if available_text_width > 500.0 {
+            // Full format with all details
+            if model_allocated > 0 {
+                format!("{} + {} / {} ({:.0}%)",
+                    format_bytes(region.used),
+                    format_bytes(model_allocated),
+                    format_bytes(region.capacity),
+                    total_fill_ratio * 100.0
+                )
+            } else {
+                format!("{} / {} ({:.0}%)",
+                    format_bytes(region.used),
+                    format_bytes(region.capacity),
+                    base_fill_ratio * 100.0
+                )
+            }
+        } else if available_text_width > 300.0 {
+            // Medium format - show consumed memory only
+            if model_allocated > 0 {
+                format!("{} + {}", format_bytes(region.used), format_bytes(model_allocated))
+            } else {
+                format!("{}", format_bytes(region.used))
+            }
         } else {
-            format!("{} / {} ({:.0}%)",
-                format_bytes(region.used),
-                format_bytes(region.capacity),
-                base_fill_ratio * 100.0
-            )
+            // Minimal format - show only LLM-consumed memory when very narrow
+            if model_allocated > 0 {
+                format_bytes(model_allocated)
+            } else {
+                format_bytes(region.used)
+            }
         };
 
         let text_extents = cr.text_extents(&stats_text).unwrap();
@@ -764,11 +784,11 @@ fn draw_memory_visualization(
     cr.move_to(margin + 4.0, legend_y);
     cr.show_text(&format!("Model: {}", format_bytes(model_size))).unwrap();
 
-    // Legend items with color boxes - better spacing
-    let legend_start_x = margin + 150.0;
-    let box_size = 11.0;
-    let box_y_offset = 7.5;
-    let legend_item_spacing = 105.0;
+    // Legend items with color boxes - condensed spacing
+    let legend_start_x = margin + 120.0;
+    let box_size = 10.0;
+    let box_y_offset = 7.0;
+    let legend_item_spacing = 100.0; // Balanced spacing to prevent overlap
 
     // "Currently Used" legend
     cr.set_source_rgba(0.37, 0.62, 0.31, 0.6);
@@ -776,7 +796,7 @@ fn draw_memory_visualization(
     cr.fill().unwrap();
 
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
-    cr.move_to(legend_start_x + box_size + 8.0, legend_y);
+    cr.move_to(legend_start_x + box_size + 6.0, legend_y);
     cr.show_text("Currently Used").unwrap();
 
     // "Model" legend
@@ -786,18 +806,20 @@ fn draw_memory_visualization(
     cr.fill().unwrap();
 
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
-    cr.move_to(model_x + box_size + 8.0, legend_y);
+    cr.move_to(model_x + box_size + 6.0, legend_y);
     cr.show_text("Model").unwrap();
 
-    // "Warning" legend
-    let warning_x = model_x + legend_item_spacing - 20.0;
-    cr.set_source_rgba(0.95, 0.60, 0.00, 1.0);
-    draw_rounded_rect(cr, warning_x, legend_y - box_y_offset, box_size, box_size, 2.0);
-    cr.fill().unwrap();
+    // "Warning" legend - only show when there's enough space
+    if width > 450.0 {
+        let warning_x = model_x + legend_item_spacing - 15.0; // Adjusted for tighter spacing
+        cr.set_source_rgba(0.95, 0.60, 0.00, 1.0);
+        draw_rounded_rect(cr, warning_x, legend_y - box_y_offset, box_size, box_size, 2.0);
+        cr.fill().unwrap();
 
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
-    cr.move_to(warning_x + box_size + 8.0, legend_y);
-    cr.show_text(">85% Full").unwrap();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
+        cr.move_to(warning_x + box_size + 6.0, legend_y);
+        cr.show_text(">85% Full").unwrap();
+    }
 }
 
 fn draw_rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
