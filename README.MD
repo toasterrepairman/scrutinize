@@ -1,5 +1,7 @@
 # scrutinize
 
+![scrutinize icon](resources/icon-scrutinize.png)
+
 ## GTK GGUF model inspector
 
 ![Screenshot of scrutinize](resources/scrutinize_screenshot.png)
