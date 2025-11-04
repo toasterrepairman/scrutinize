@@ -62,7 +62,7 @@
             # Install MIME type definition
             install -Dm644 resources/scrutinize-mimetypes.xml $out/share/mime/packages/scrutinize.xml
 
-            # install -Dt $out/share/icons resources/icon-scrutinize.png
+            install -Dt $out/share/icons resources/icon-scrutinize.png
         '';
       };
 
