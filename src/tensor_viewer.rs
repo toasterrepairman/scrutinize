@@ -327,12 +327,25 @@ impl TensorPage {
 
         content.append(&viz_header);
 
-        // Loading label (will be replaced by heatmap or error)
+        // Loading indicator with spinner
+        let loading_box = GtkBox::new(Orientation::Horizontal, 8);
+        loading_box.set_halign(gtk::Align::Center);
+        loading_box.set_valign(gtk::Align::Center);
+        loading_box.set_margin_top(12);
+        loading_box.set_margin_bottom(12);
+
+        let spinner = gtk::Spinner::builder()
+            .spinning(true)
+            .build();
+        loading_box.append(&spinner);
+
         let status_label = gtk::Label::builder()
             .label("Loading tensor data...")
             .css_classes(vec!["dim-label".to_string()])
             .build();
-        content.append(&status_label);
+        loading_box.append(&status_label);
+
+        content.append(&loading_box);
 
         let heatmap_widget = HeatmapWidget::new();
         heatmap_widget.widget().set_visible(false);
@@ -371,12 +384,14 @@ impl TensorPage {
         let tensor_clone = tensor.clone();
         let file_path_clone = file_path.to_path_buf();
         let heatmap_weak = heatmap_widget.clone();
+        let loading_box_weak = loading_box.downgrade();
         let status_weak = status_label.downgrade();
         let stats_separator_weak = stats_separator.downgrade();
         let stats_label_weak = stats_label.downgrade();
         let stats_grid_weak = stats_grid.downgrade();
         let toggle_btn_weak = toggle_button.downgrade();
 
+        // Use async-std for true async file I/O
         glib::spawn_future_local(async move {
             use crate::tensor_slice::SliceSelection;
 
@@ -405,31 +420,86 @@ impl TensorPage {
             let tensor_for_callback = tensor_clone.clone();
             let file_path_for_callback = file_path_clone.clone();
             let heatmap_for_callback = heatmap_weak.clone();
+            let status_for_callback = status_weak.clone();
+            let loading_for_callback = loading_box_weak.clone();
+
             heatmap_weak.set_on_slice_change(move |new_selection| {
                 eprintln!("Slice changed, reloading data...");
                 let tensor = tensor_for_callback.clone();
                 let path = file_path_for_callback.clone();
                 let heatmap = heatmap_for_callback.clone();
+                let status = status_for_callback.clone();
+                let loading = loading_for_callback.clone();
+
+                // Show loading indicator
+                if let Some(loading_box) = loading.upgrade() {
+                    loading_box.set_visible(true);
+                }
+                if let Some(label) = status.upgrade() {
+                    label.set_label("Loading slice...");
+                    label.remove_css_class("error");
+                }
 
                 // Spawn async task to reload data
                 glib::spawn_future_local(async move {
                     // Cap at 256x256 for consistent performance
                     let max_elements = 256 * 256;
 
-                    match tensor.read_tensor_data_with_slice(&path, max_elements, Some(&new_selection)) {
+                    // Run blocking I/O in a background thread to avoid blocking UI
+                    let (tx, rx) = async_channel::unbounded();
+                    let tensor = tensor.clone();
+                    let path = path.clone();
+                    let new_selection_for_thread = new_selection.clone();
+
+                    std::thread::spawn(move || {
+                        let result = tensor.read_tensor_data_with_slice(&path, max_elements, Some(&new_selection_for_thread));
+                        let _ = tx.send_blocking(result);
+                    });
+
+                    let result = rx.recv().await.unwrap_or_else(|_| Err("Thread panicked".to_string()));
+
+                    match result {
                         Ok(data) => {
                             let (h, w) = new_selection.slice_shape();
                             heatmap.set_data(data, &vec![h, w]);
                             eprintln!("Data reloaded successfully for new slice");
+
+                            // Hide loading indicator
+                            if let Some(loading_box) = loading.upgrade() {
+                                loading_box.set_visible(false);
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error reloading slice data: {}", e);
+
+                            // Hide spinner, show error
+                            if let Some(loading_box) = loading.upgrade() {
+                                loading_box.set_visible(false);
+                            }
+                            if let Some(label) = status.upgrade() {
+                                label.set_label(&format!("Error: {}", e));
+                                label.set_visible(true);
+                                label.add_css_class("error");
+                            }
                         }
                     }
                 });
             });
 
-            match tensor_clone.read_tensor_data_with_slice(&file_path_clone, max_elements, slice_selection.as_ref()) {
+            // Run initial data load in background thread to avoid blocking UI
+            let (tx, rx) = async_channel::unbounded();
+            let tensor = tensor_clone.clone();
+            let path = file_path_clone.clone();
+            let sel = slice_selection.clone();
+
+            std::thread::spawn(move || {
+                let result = tensor.read_tensor_data_with_slice(&path, max_elements, sel.as_ref());
+                let _ = tx.send_blocking(result);
+            });
+
+            let result = rx.recv().await.unwrap_or_else(|_| Err("Thread panicked".to_string()));
+
+            match result {
                 Ok(data) => {
                     // Get the shape to display based on slice selection
                     let display_shape = if let Some(ref sel) = slice_selection {
@@ -441,8 +511,10 @@ impl TensorPage {
 
                     heatmap_weak.set_data(data, &display_shape);
                     heatmap_weak.widget().set_visible(true);
-                    if let Some(label) = status_weak.upgrade() {
-                        label.set_visible(false);
+
+                    // Hide loading indicator
+                    if let Some(loading_box) = loading_box_weak.upgrade() {
+                        loading_box.set_visible(false);
                     }
 
                     // Enable the toggle button now that data is loaded
@@ -464,8 +536,13 @@ impl TensorPage {
                     }
                 }
                 Err(e) => {
+                    // Hide spinner, show error
+                    if let Some(loading_box) = loading_box_weak.upgrade() {
+                        loading_box.set_visible(false);
+                    }
                     if let Some(label) = status_weak.upgrade() {
                         label.set_label(&format!("Error loading tensor: {}", e));
+                        label.set_visible(true);
                         label.add_css_class("error");
                     }
                 }

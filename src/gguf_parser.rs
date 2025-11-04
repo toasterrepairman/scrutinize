@@ -363,6 +363,7 @@ impl TensorInfo {
 
     /// Read only the specified 2D slice from a multi-dimensional tensor
     /// This is much more efficient than reading the entire tensor
+    /// Optimized with buffered reading and smart row-wise access patterns
     fn read_slice_optimized<R: Read + Seek>(
         &self,
         file: &mut R,
@@ -385,37 +386,82 @@ impl TensorInfo {
 
         let bytes_per_element = self.bytes_per_element();
 
-        // Read elements by computing their linear offsets
-        let mut samples_read = 0;
-        for row in 0..slice_height {
-            for col in 0..slice_width {
-                // Apply downsampling
-                let linear_idx = row * slice_width + col;
-                if linear_idx as usize % stride != 0 {
-                    continue;
+        // For large slices, use row-wise buffered reading for better performance
+        // This reduces the number of seeks dramatically (from N*M to N)
+        if slice_width > 100 && stride == 1 {
+            // Read entire rows at once (no downsampling, but large slice)
+            let row_stride = if slice_height as usize > max_elements / slice_width as usize {
+                (slice_height as usize * slice_width as usize + max_elements - 1) / max_elements
+            } else {
+                1
+            };
+
+            let mut samples_read = 0;
+            for row in (0..slice_height).step_by(row_stride.max(1)) {
+                if samples_read >= samples_to_read {
+                    break;
+                }
+
+                // Calculate the contiguous range of elements for this row
+                let row_start_offset = slice.linear_offset(row, 0)
+                    .ok_or("Invalid slice offset")?;
+                let row_size_bytes = (slice_width * bytes_per_element) as usize;
+
+                // Seek to the start of the row
+                let file_offset = self.offset + row_start_offset * bytes_per_element;
+                file.seek(SeekFrom::Start(file_offset))
+                    .map_err(|e| format!("Seek failed: {}", e))?;
+
+                // Read the entire row into a buffer
+                let mut row_buffer = vec![0u8; row_size_bytes];
+                file.read_exact(&mut row_buffer)
+                    .map_err(|e| format!("Read failed: {}", e))?;
+
+                // Parse elements from the buffer
+                let mut buf_reader = std::io::Cursor::new(row_buffer);
+                for _ in 0..slice_width {
+                    if samples_read >= samples_to_read {
+                        break;
+                    }
+
+                    let value = self.read_single_element(&mut buf_reader)?;
+                    result.push(value);
+                    samples_read += 1;
+                }
+            }
+        } else {
+            // Original element-by-element reading with stride (for downsampling)
+            let mut samples_read = 0;
+            for row in 0..slice_height {
+                for col in 0..slice_width {
+                    // Apply downsampling
+                    let linear_idx = row * slice_width + col;
+                    if linear_idx as usize % stride != 0 {
+                        continue;
+                    }
+
+                    if samples_read >= samples_to_read {
+                        break;
+                    }
+
+                    // Get the linear offset in the full tensor
+                    let offset = slice.linear_offset(row, col)
+                        .ok_or("Invalid slice offset")?;
+
+                    // Seek to this element
+                    let file_offset = self.offset + offset * bytes_per_element;
+                    file.seek(SeekFrom::Start(file_offset))
+                        .map_err(|e| format!("Seek failed: {}", e))?;
+
+                    // Read the value
+                    let value = self.read_single_element(file)?;
+                    result.push(value);
+                    samples_read += 1;
                 }
 
                 if samples_read >= samples_to_read {
                     break;
                 }
-
-                // Get the linear offset in the full tensor
-                let offset = slice.linear_offset(row, col)
-                    .ok_or("Invalid slice offset")?;
-
-                // Seek to this element
-                let file_offset = self.offset + offset * bytes_per_element;
-                file.seek(SeekFrom::Start(file_offset))
-                    .map_err(|e| format!("Seek failed: {}", e))?;
-
-                // Read the value
-                let value = self.read_single_element(file)?;
-                result.push(value);
-                samples_read += 1;
-            }
-
-            if samples_read >= samples_to_read {
-                break;
             }
         }
 
