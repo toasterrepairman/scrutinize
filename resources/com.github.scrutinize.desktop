@@ -8,7 +8,7 @@ Comment=Inspect the contents of GGUF model files
 
 ## The executable of the application with optional args ##
 ## You can state full path too ##
-Exec=scrutinize
+Exec=scrutinize %F
 
 ## State the name of the icon that will be used to display this entry ##
 Icon=icon-scrutinize

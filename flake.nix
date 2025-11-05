@@ -63,6 +63,10 @@
             install -Dm644 resources/scrutinize-mimetypes.xml $out/share/mime/packages/scrutinize.xml
 
             install -Dt $out/share/icons resources/icon-scrutinize.png
+
+            # Update MIME and desktop databases
+            ${pkgs.shared-mime-info}/bin/update-mime-database $out/share/mime
+            ${pkgs.desktop-file-utils}/bin/update-desktop-database $out/share/applications
         '';
       };
 
