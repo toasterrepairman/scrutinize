@@ -478,32 +478,14 @@ fn draw_heatmap(cr: &gtk::cairo::Context, width: i32, height: i32, data: &Heatma
             cr.rectangle(
                 x as f64 * cell_width,
                 y as f64 * cell_height,
-                cell_width,
-                cell_height,
+                cell_width + 0.5,  // Add small overlap to prevent gaps
+                cell_height + 0.5, // Add small overlap to prevent gaps
             );
             cr.fill().unwrap();
         }
     }
 
-    // Draw subtle grid lines if cells are large enough
-    if cell_width >= 4.0 && cell_height >= 4.0 {
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.1);
-        cr.set_line_width(0.5);
-
-        for x in 0..=data.width {
-            let px = x as f64 * cell_width;
-            cr.move_to(px, 0.0);
-            cr.line_to(px, heatmap_height);
-        }
-
-        for y in 0..=data.height {
-            let py = y as f64 * cell_height;
-            cr.move_to(0.0, py);
-            cr.line_to(width, py);
-        }
-
-        cr.stroke().unwrap();
-    }
+    // Grid lines removed for cleaner visualization
 
     // Draw colormap legend at bottom
     draw_colormap_legend(cr, width, heatmap_height, legend_height, data.min_value, data.max_value);
@@ -586,17 +568,13 @@ fn draw_colormap_legend(cr: &gtk::cairo::Context, width: f64, y_offset: f64, leg
         cr.rectangle(
             margin + i as f64 * segment_width,
             bar_y,
-            segment_width.ceil(),
+            segment_width + 0.5,  // Add small overlap to prevent gaps
             bar_height,
         );
         cr.fill().unwrap();
     }
 
-    // Draw border around gradient bar
-    cr.set_source_rgba(0.5, 0.5, 0.5, 0.5);
-    cr.set_line_width(1.0);
-    cr.rectangle(margin, bar_y, bar_width, bar_height);
-    cr.stroke().unwrap();
+    // Border removed for cleaner visualization
 
     // Draw min/max labels
     cr.set_source_rgba(0.8, 0.8, 0.8, 0.9);
