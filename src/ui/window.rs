@@ -165,7 +165,18 @@ impl GGUFWindow {
 
         // Load GGUF file
         match GGUFFile::load(path) {
-            Ok(gguf_file) => {
+            Ok(mut gguf_file) => {
+                // Initialize memory mapping for performance
+                if let Err(e) = gguf_file.init_mmap() {
+                    eprintln!("Warning: Failed to initialize memory mapping: {}. Falling back to file I/O.", e);
+                } else {
+                    println!("Memory mapping initialized successfully");
+                }
+
+                // Print performance statistics
+                let stats = gguf_file.get_performance_stats();
+                println!("{}", stats);
+
                 *self.gguf_data.borrow_mut() = Some(gguf_file.clone());
 
                 // Update window title

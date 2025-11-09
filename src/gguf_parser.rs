@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use memmap2::Mmap;
+use std::sync::Arc;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in ASCII
 const GGUF_VERSION: u32 = 3;
@@ -12,6 +14,8 @@ pub struct GGUFFile {
     pub metadata: GGUFMetadata,
     pub tensors: Vec<TensorInfo>,
     pub file_size: u64,
+    mmap: Option<Arc<Mmap>>,  // Memory-mapped file for efficient access
+    file_path: Option<std::path::PathBuf>,  // Store file path for lazy mmap initialization
 }
 
 #[derive(Debug, Clone)]
@@ -204,9 +208,111 @@ impl GGUFFile {
             },
             tensors,
             file_size,
+            mmap: None,  // Will be initialized lazily when needed
+            file_path: Some(path.to_path_buf()),
         })
     }
 
+    /// Initialize memory mapping for efficient tensor access
+    pub fn init_mmap(&mut self) -> Result<(), String> {
+        if self.mmap.is_none() {
+            let path = self.file_path.as_ref()
+                .ok_or("File path not available for memory mapping")?;
+
+            let file = File::open(path)
+                .map_err(|e| format!("Failed to open file for memory mapping: {}", e))?;
+
+            let mmap = unsafe { Mmap::map(&file) }
+                .map_err(|e| format!("Failed to create memory map: {}", e))?;
+
+            self.mmap = Some(Arc::new(mmap));
+        }
+        Ok(())
+    }
+
+    /// Get memory map, initializing if necessary
+    pub fn get_mmap(&self) -> Result<Arc<Mmap>, String> {
+        if let Some(ref mmap) = self.mmap {
+            Ok(mmap.clone())
+        } else {
+            // Need mutable reference to initialize, but we're in an immutable context
+            // This suggests we need to restructure the API
+            Err("Memory map not initialized. Call init_mmap() first.".to_string())
+        }
+    }
+
+    /// Optimized tensor reading that combines all improvements
+    /// This is the preferred method for accessing tensor data
+    pub fn read_tensor_data_optimized(
+        &mut self,
+        tensor_name: &str,
+        max_elements: usize,
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+    ) -> Result<Vec<f32>, String> {
+        // Initialize memory mapping if not already done
+        self.init_mmap()?;
+
+        // Find the tensor
+        let tensor = self.tensors.iter()
+            .find(|t| t.name == tensor_name)
+            .ok_or(format!("Tensor '{}' not found", tensor_name))?;
+
+        // Get the memory map
+        let mmap = self.get_mmap()?;
+
+        // Use the optimized tensor reading method
+        tensor.read_tensor_data_optimized(&*mmap, max_elements, slice_selection)
+    }
+
+    /// Get tensor info without reading data
+    pub fn get_tensor_info(&self, tensor_name: &str) -> Option<&TensorInfo> {
+        self.tensors.iter().find(|t| t.name == tensor_name)
+    }
+
+    /// List all tensor names
+    pub fn list_tensor_names(&self) -> Vec<&String> {
+        self.tensors.iter().map(|t| &t.name).collect()
+    }
+
+    /// Get performance statistics for the loaded model
+    pub fn get_performance_stats(&self) -> PerformanceStats {
+        PerformanceStats {
+            total_tensors: self.tensors.len(),
+            total_parameters: self.compute_total_parameters(),
+            total_memory_bytes: self.compute_memory_requirements(),
+            memory_mapping_enabled: self.mmap.is_some(),
+            quantized_tensors: self.tensors.iter()
+                .filter(|t| matches!(t.dtype, GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 | GGMLType::Q2_K | GGMLType::Q3_K | GGMLType::Q4_K | GGMLType::Q5_K | GGMLType::Q6_K | GGMLType::Q8_K))
+                .count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PerformanceStats {
+    pub total_tensors: usize,
+    pub total_parameters: u64,
+    pub total_memory_bytes: u64,
+    pub memory_mapping_enabled: bool,
+    pub quantized_tensors: usize,
+}
+
+impl std::fmt::Display for PerformanceStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Performance Statistics:")?;
+        writeln!(f, "  Total Tensors: {}", self.total_tensors)?;
+        writeln!(f, "  Total Parameters: {:.2}B", self.total_parameters as f64 / 1e9)?;
+        writeln!(f, "  Total Memory: {:.2}GB", self.total_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0))?;
+        writeln!(f, "  Memory Mapping: {}", if self.memory_mapping_enabled { "Enabled" } else { "Disabled" })?;
+        writeln!(f, "  Quantized Tensors: {} ({:.1}%)",
+            self.quantized_tensors,
+            (self.quantized_tensors as f64 / self.total_tensors as f64) * 100.0
+        )?;
+        Ok(())
+    }
+}
+
+impl GGUFFile {
     pub fn compute_total_parameters(&self) -> u64 {
         self.tensors.iter().map(|t| {
             t.dimensions.iter().product::<u64>()
@@ -275,6 +381,121 @@ impl GGUFMetadata {
     }
 }
 
+// Dequantization functions for different GGML types
+mod dequantize {
+    use super::GGMLType;
+    use half::f16;
+
+    /// Dequantize Q4_0 format: 8 quantized values + 1 fp16 scale
+    pub fn q4_0(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let chunks = data.chunks_exact(9); // Q4_0 block size
+
+        for chunk in chunks {
+            if result.len() >= count {
+                break;
+            }
+
+            // Read scale (fp16)
+            let scale_bytes = [chunk[0], chunk[1]];
+            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+
+            // Read 8 quantized values (4 bits each)
+            for i in 0..8 {
+                if result.len() >= count {
+                    break;
+                }
+                let byte_idx = 2 + i / 2;
+                let quantized = (chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
+                let value = (quantized as f32 - 8.0) * scale;
+                result.push(value);
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q4_1 format: 8 quants + 1 fp16 min + 1 fp16 scale
+    pub fn q4_1(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let chunks = data.chunks_exact(10); // Q4_1 block size
+
+        for chunk in chunks {
+            if result.len() >= count {
+                break;
+            }
+
+            // Read min and scale (both fp16)
+            let min_bytes = [chunk[0], chunk[1]];
+            let scale_bytes = [chunk[2], chunk[3]];
+            let min = f16::from_le_bytes(min_bytes).to_f32();
+            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+
+            // Read 8 quantized values
+            for i in 0..8 {
+                if result.len() >= count {
+                    break;
+                }
+                let byte_idx = 4 + i / 2;
+                let quantized = (chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
+                let value = min + (quantized as f32 * scale);
+                result.push(value);
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q8_0 format: 32 quantized values + 1 fp16 scale
+    pub fn q8_0(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let chunks = data.chunks_exact(34); // Q8_0 block size
+
+        for chunk in chunks {
+            if result.len() >= count {
+                break;
+            }
+
+            // Read scale (fp16)
+            let scale_bytes = [chunk[0], chunk[1]];
+            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+
+            // Read 32 quantized values (int8 each)
+            for i in 0..32 {
+                if result.len() >= count {
+                    break;
+                }
+                let quantized = chunk[2 + i] as i8 as f32;
+                let value = quantized * scale;
+                result.push(value);
+            }
+        }
+
+        result
+    }
+
+    /// Simplified dequantization for other quantized types
+    /// For production use, implement proper dequantization for each type
+    pub fn simplified(data: &[u8], count: usize) -> Vec<f32> {
+        data.iter()
+            .take(count)
+            .map(|&b| (b as f32 - 128.0) / 128.0) // Normalize to -1..1
+            .collect()
+    }
+
+    /// Convert f16 to f32 using half crate
+    pub fn f16_to_f32(data: &[u8], count: usize) -> Vec<f32> {
+        let chunks = data.chunks_exact(2);
+        chunks
+            .take(count)
+            .map(|chunk| {
+                let f16_val = f16::from_le_bytes([chunk[0], chunk[1]]);
+                f16_val.to_f32()
+            })
+            .collect()
+    }
+}
+
 impl TensorInfo {
     pub fn element_count(&self) -> u64 {
         self.dimensions.iter().product()
@@ -300,6 +521,335 @@ impl TensorInfo {
                     (self.size_bytes + element_count - 1) / element_count
                 } else {
                     1
+                }
+            }
+        }
+    }
+
+    /// Optimized tensor data reading using memory mapping
+    /// This is the primary method that should be used for tensor access
+    pub fn read_tensor_data_optimized(
+        &self,
+        mmap: &memmap2::Mmap,
+        max_elements: usize,
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+    ) -> Result<Vec<f32>, String> {
+        if let Some(slice) = slice_selection {
+            self.read_slice_mmap(mmap, slice, max_elements)
+        } else {
+            self.read_entire_tensor_mmap(mmap, max_elements)
+        }
+    }
+
+    /// Read entire tensor using memory mapping (no file I/O!)
+    fn read_entire_tensor_mmap(
+        &self,
+        mmap: &memmap2::Mmap,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
+        let element_count = self.element_count() as usize;
+
+        // Calculate stride for downsampling
+        let stride = if element_count > max_elements {
+            (element_count + max_elements - 1) / max_elements
+        } else {
+            1
+        };
+
+        let samples_to_read = (element_count + stride - 1) / stride;
+        let samples_to_read = samples_to_read.min(max_elements);
+
+        // Calculate byte range for the samples we need
+        let end_offset = self.offset + (samples_to_read * stride) as u64 * self.bytes_per_element();
+
+        // Ensure we don't go beyond the mapped region
+        if end_offset as usize > mmap.len() {
+            return Err("Tensor data extends beyond mapped region".to_string());
+        }
+
+        // Get the tensor data as bytes
+        let tensor_data = &mmap[self.offset as usize..end_offset as usize];
+
+        // Parse based on data type with proper dequantization
+        match self.dtype {
+            GGMLType::F32 => {
+                let chunks = tensor_data.chunks_exact(4);
+                Ok(chunks
+                    .step_by(stride)
+                    .take(samples_to_read)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect())
+            }
+            GGMLType::F16 => {
+                Ok(dequantize::f16_to_f32(tensor_data, samples_to_read))
+            }
+            GGMLType::I8 => {
+                Ok(tensor_data
+                    .iter()
+                    .step_by(stride)
+                    .take(samples_to_read)
+                    .map(|&b| b as i8 as f32)
+                    .collect())
+            }
+            GGMLType::I16 => {
+                let chunks = tensor_data.chunks_exact(2);
+                Ok(chunks
+                    .step_by(stride)
+                    .take(samples_to_read)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32)
+                    .collect())
+            }
+            GGMLType::I32 => {
+                let chunks = tensor_data.chunks_exact(4);
+                Ok(chunks
+                    .step_by(stride)
+                    .take(samples_to_read)
+                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+                    .collect())
+            }
+            GGMLType::Q4_0 => {
+                Ok(dequantize::q4_0(tensor_data, samples_to_read))
+            }
+            GGMLType::Q4_1 => {
+                Ok(dequantize::q4_1(tensor_data, samples_to_read))
+            }
+            GGMLType::Q8_0 => {
+                Ok(dequantize::q8_0(tensor_data, samples_to_read))
+            }
+            // For other quantized types, use simplified dequantization
+            _ => {
+                Ok(dequantize::simplified(tensor_data, samples_to_read))
+            }
+        }
+    }
+
+    /// Read a 2D slice using memory mapping with bulk row reading
+    fn read_slice_mmap(
+        &self,
+        mmap: &memmap2::Mmap,
+        slice: &crate::tensor_slice::SliceSelection,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
+        let (slice_height, slice_width) = slice.slice_shape();
+        let slice_elements = (slice_height * slice_width) as usize;
+
+        // Calculate downsampling if needed
+        let stride = if slice_elements > max_elements {
+            (slice_elements + max_elements - 1) / max_elements
+        } else {
+            1
+        };
+
+        let samples_to_read = (slice_elements + stride - 1) / stride;
+        let samples_to_read = samples_to_read.min(max_elements);
+
+        // Use bulk row reading for better performance
+        if slice_width > 100 && stride == 1 {
+            self.read_slice_bulk_rows(mmap, slice, samples_to_read)
+        } else {
+            self.read_slice_element_by_element(mmap, slice, stride, samples_to_read)
+        }
+    }
+
+    /// Bulk row reading - reads entire rows at once for maximum efficiency
+    fn read_slice_bulk_rows(
+        &self,
+        mmap: &memmap2::Mmap,
+        slice: &crate::tensor_slice::SliceSelection,
+        samples_to_read: usize,
+    ) -> Result<Vec<f32>, String> {
+        let (slice_height, slice_width) = slice.slice_shape();
+        let mut result = Vec::with_capacity(samples_to_read);
+        let bytes_per_element = self.bytes_per_element();
+
+        // Calculate row stride for downsampling
+        let row_stride = if slice_height as usize * slice_width as usize > samples_to_read {
+            (slice_height as usize * slice_width as usize + samples_to_read - 1) / samples_to_read
+        } else {
+            1
+        };
+
+        let mut samples_read = 0;
+        for row in (0..slice_height).step_by(row_stride.max(1)) {
+            if samples_read >= samples_to_read {
+                break;
+            }
+
+            // Calculate the contiguous range for this row
+            let row_start_offset = slice.linear_offset(row, 0)
+                .ok_or("Invalid slice offset")?;
+            let row_end_offset = slice.linear_offset(row, slice_width - 1)
+                .ok_or("Invalid slice offset")?;
+
+            let start_byte = (self.offset + row_start_offset * bytes_per_element) as usize;
+            let end_byte = (self.offset + row_end_offset * bytes_per_element + bytes_per_element) as usize;
+
+            // Ensure we're within bounds
+            if end_byte > mmap.len() {
+                return Err("Slice data extends beyond mapped region".to_string());
+            }
+
+            // Read entire row at once
+            let row_data = &mmap[start_byte..end_byte];
+
+            // Parse row data based on type
+            let row_values = self.parse_tensor_bytes(row_data, slice_width as usize, samples_to_read - samples_read)?;
+            result.extend_from_slice(&row_values);
+            samples_read += row_values.len();
+        }
+
+        Ok(result)
+    }
+
+    /// Element-by-element reading for downsampling or small slices
+    fn read_slice_element_by_element(
+        &self,
+        mmap: &memmap2::Mmap,
+        slice: &crate::tensor_slice::SliceSelection,
+        stride: usize,
+        samples_to_read: usize,
+    ) -> Result<Vec<f32>, String> {
+        let (slice_height, slice_width) = slice.slice_shape();
+        let mut result = Vec::with_capacity(samples_to_read);
+        let bytes_per_element = self.bytes_per_element();
+
+        let mut samples_read = 0;
+        for row in 0..slice_height {
+            for col in 0..slice_width {
+                // Apply downsampling
+                let linear_idx = row * slice_width + col;
+                if linear_idx as usize % stride != 0 {
+                    continue;
+                }
+
+                if samples_read >= samples_to_read {
+                    break;
+                }
+
+                // Get the linear offset in the full tensor
+                let offset = slice.linear_offset(row, col)
+                    .ok_or("Invalid slice offset")?;
+
+                // Calculate byte position
+                let start_byte = (self.offset + offset * bytes_per_element) as usize;
+                let end_byte = start_byte + bytes_per_element as usize;
+
+                // Ensure we're within bounds
+                if end_byte > mmap.len() {
+                    return Err("Slice element extends beyond mapped region".to_string());
+                }
+
+                // Read single element
+                let element_data = &mmap[start_byte..end_byte];
+                let value = self.parse_single_element(element_data)?;
+                result.push(value);
+                samples_read += 1;
+            }
+
+            if samples_read >= samples_to_read {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Parse tensor bytes based on data type
+    fn parse_tensor_bytes(&self, data: &[u8], max_values: usize, limit: usize) -> Result<Vec<f32>, String> {
+        let values_to_parse = max_values.min(limit);
+
+        match self.dtype {
+            GGMLType::F32 => {
+                let chunks = data.chunks_exact(4);
+                Ok(chunks
+                    .take(values_to_parse)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect())
+            }
+            GGMLType::F16 => {
+                Ok(dequantize::f16_to_f32(data, values_to_parse))
+            }
+            GGMLType::I8 => {
+                Ok(data.iter()
+                    .take(values_to_parse)
+                    .map(|&b| b as i8 as f32)
+                    .collect())
+            }
+            GGMLType::I16 => {
+                let chunks = data.chunks_exact(2);
+                Ok(chunks
+                    .take(values_to_parse)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32)
+                    .collect())
+            }
+            GGMLType::I32 => {
+                let chunks = data.chunks_exact(4);
+                Ok(chunks
+                    .take(values_to_parse)
+                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+                    .collect())
+            }
+            GGMLType::Q4_0 => {
+                Ok(dequantize::q4_0(data, values_to_parse))
+            }
+            GGMLType::Q4_1 => {
+                Ok(dequantize::q4_1(data, values_to_parse))
+            }
+            GGMLType::Q8_0 => {
+                Ok(dequantize::q8_0(data, values_to_parse))
+            }
+            _ => {
+                Ok(dequantize::simplified(data, values_to_parse))
+            }
+        }
+    }
+
+    /// Parse a single element from bytes
+    fn parse_single_element(&self, data: &[u8]) -> Result<f32, String> {
+        match self.dtype {
+            GGMLType::F32 => {
+                if data.len() >= 4 {
+                    Ok(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+                } else {
+                    Err("Insufficient data for F32".to_string())
+                }
+            }
+            GGMLType::F16 => {
+                if data.len() >= 2 {
+                    let chunks = data.chunks_exact(2);
+                    let f16_vals: Vec<f32> = dequantize::f16_to_f32(data, 1);
+                    Ok(f16_vals[0])
+                } else {
+                    Err("Insufficient data for F16".to_string())
+                }
+            }
+            GGMLType::I8 => {
+                if !data.is_empty() {
+                    Ok(data[0] as i8 as f32)
+                } else {
+                    Err("Insufficient data for I8".to_string())
+                }
+            }
+            GGMLType::I16 => {
+                if data.len() >= 2 {
+                    Ok(i16::from_le_bytes([data[0], data[1]]) as f32)
+                } else {
+                    Err("Insufficient data for I16".to_string())
+                }
+            }
+            GGMLType::I32 => {
+                if data.len() >= 4 {
+                    Ok(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f32)
+                } else {
+                    Err("Insufficient data for I32".to_string())
+                }
+            }
+            _ => {
+                // For quantized types, simplified normalization
+                if !data.is_empty() {
+                    Ok((data[0] as f32 - 128.0) / 128.0)
+                } else {
+                    Err("Insufficient data for quantized type".to_string())
                 }
             }
         }

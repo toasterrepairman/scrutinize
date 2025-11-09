@@ -12,6 +12,7 @@ pub struct TensorPage {
     tensor_list: gtk::ListView,
     memory_viz: DrawingArea,
     tensors: Rc<RefCell<Vec<TensorInfo>>>,
+    gguf_file: Rc<RefCell<Option<GGUFFile>>>, // Store reference to GGUFFile for optimized access
     system_info: Rc<RefCell<SystemMemoryInfo>>,
     file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
@@ -65,6 +66,7 @@ impl TensorPage {
             .build();
 
         let tensors = Rc::new(RefCell::new(Vec::new()));
+        let gguf_file = Rc::new(RefCell::new(None));
         let file_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
 
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -191,6 +193,7 @@ impl TensorPage {
             tensor_list,
             memory_viz: memory_viz.clone(),
             tensors: tensors.clone(),
+            gguf_file: gguf_file.clone(),
             system_info: system_info.clone(),
             file_path: file_path.clone(),
         };
@@ -213,6 +216,7 @@ impl TensorPage {
 
     pub fn load_tensors(&self, gguf_file: &GGUFFile) {
         *self.tensors.borrow_mut() = gguf_file.tensors.clone();
+        *self.gguf_file.borrow_mut() = Some(gguf_file.clone()); // Store GGUFFile for optimized access
 
         // Update list view
         if let Some(selection_model) = self.tensor_list.model() {
@@ -238,6 +242,31 @@ impl TensorPage {
 
     pub fn set_file_path(&self, path: std::path::PathBuf) {
         *self.file_path.borrow_mut() = Some(path);
+    }
+
+    /// Optimized tensor data reading using memory mapping when available
+    /// Falls back to file I/O if memory mapping is not initialized
+    async fn read_tensor_data_optimized(
+        &self,
+        tensor: &TensorInfo,
+        max_elements: usize,
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+    ) -> Result<Vec<f32>, String> {
+        // Try to use optimized memory-mapped reading first
+        if let Some(ref gguf_file) = *self.gguf_file.borrow() {
+            // Check if memory mapping is available
+            if let Ok(mmap) = gguf_file.get_mmap() {
+                // Use memory-mapped reading (much faster)
+                return tensor.read_tensor_data_optimized(&*mmap, max_elements, slice_selection);
+            }
+        }
+
+        // Fall back to file I/O if memory mapping is not available
+        if let Some(ref path) = *self.file_path.borrow() {
+            return tensor.read_tensor_data_with_slice(path, max_elements, slice_selection);
+        }
+
+        Err("No file path available for tensor reading".to_string())
     }
 
     fn show_tensor_popover(parent: &gtk::Widget, tensor: &TensorInfo, file_path: &std::path::Path) {
