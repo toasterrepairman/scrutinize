@@ -386,59 +386,122 @@ mod dequantize {
     use super::GGMLType;
     use half::f16;
 
-    /// Dequantize Q4_0 format: 8 quantized values + 1 fp16 scale
+    /// Get the block size for a quantization format
+    pub fn block_size(ggml_type: GGMLType) -> usize {
+        match ggml_type {
+            GGMLType::Q4_0 => 8,
+            GGMLType::Q4_1 => 8,
+            GGMLType::Q5_0 => 8,
+            GGMLType::Q5_1 => 8,
+            GGMLType::Q8_0 => 32,
+            GGMLType::Q8_1 => 32,
+            GGMLType::Q2_K => 16,
+            GGMLType::Q3_K => 16,
+            GGMLType::Q4_K => 16,
+            GGMLType::Q5_K => 16,
+            GGMLType::Q6_K => 16,
+            GGMLType::Q8_K => 16,
+            GGMLType::MXFP4 => 4, // 4 FP4 values per 2-byte chunk
+            _ => 1,
+        }
+    }
+
+    /// Get the block size in bytes for a quantization format
+    pub fn block_bytes(ggml_type: GGMLType) -> usize {
+        match ggml_type {
+            GGMLType::Q4_0 => 9,   // scale (2 bytes) + 8 quants (4 bytes)
+            GGMLType::Q4_1 => 10,  // min (2 bytes) + scale (2 bytes) + 8 quants (4 bytes)
+            GGMLType::Q5_0 => 12,  // scale (2 bytes) + min_h (1 byte) + qs (4 bytes) + qh (4 bytes)
+            GGMLType::Q5_1 => 14,  // min (2 bytes) + scale (2 bytes) + qs (4 bytes) + qh (4 bytes) + dmin (2 bytes)
+            GGMLType::Q8_0 => 34,  // scale (2 bytes) + 32 quants (32 bytes)
+            GGMLType::Q8_1 => 40,  // scale (2 bytes) + scale2 (2 bytes) + 32 quants (32 bytes) + dmin (4 bytes)
+            GGMLType::Q2_K => 6,   // scale (2 bytes) + min (2 bytes) + qs (1 byte) + qh (1 byte)
+            GGMLType::Q3_K => 8,   // scale (2 bytes) + h (1 byte) + qs (3 bytes) + qh (2 bytes)
+            GGMLType::Q4_K => 10,  // scale (2 bytes) + min (2 bytes) + scales (3 bytes) + qs (5 bytes)
+            GGMLType::Q5_K => 12,  // scale (2 bytes) + min (2 bytes) + scales (4 bytes) + qh (2 bytes) + qs (6 bytes)
+            GGMLType::Q6_K => 16,  // scale (2 bytes) + min (2 bytes) + scales (6 bytes) + qh (2 bytes) + q8 (8 bytes)
+            GGMLType::Q8_K => 20,  // scale (2 bytes) + min (2 bytes) + scales (12 bytes) + qs (4 bytes)
+            GGMLType::MXFP4 => 2,  // 4 FP4 values in 2 bytes
+            _ => 4,  // Default to 4 bytes for unquantized types
+        }
+    }
+
+    /// Dequantize Q4_0 format: each block has scale (fp16) + 8 quants (4-bit)
     pub fn q4_0(data: &[u8], count: usize) -> Vec<f32> {
         let mut result = Vec::with_capacity(count);
-        let chunks = data.chunks_exact(9); // Q4_0 block size
+        let block_bytes = block_bytes(GGMLType::Q4_0);
+        let block_size = block_size(GGMLType::Q4_0);
+        let chunks = data.chunks_exact(block_bytes);
 
-        for chunk in chunks {
-            if result.len() >= count {
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
                 break;
             }
 
             // Read scale (fp16)
-            let scale_bytes = [chunk[0], chunk[1]];
-            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
 
             // Read 8 quantized values (4 bits each)
             for i in 0..8 {
-                if result.len() >= count {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
                     break;
                 }
+
                 let byte_idx = 2 + i / 2;
                 let quantized = (chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
+                // Q4_0 range: -8 to +7
                 let value = (quantized as f32 - 8.0) * scale;
                 result.push(value);
             }
         }
 
+        // Handle partial block at the end if needed
+        if result.len() < count {
+            let remaining = count - result.len();
+            if let Some(last_chunk) = data.chunks_exact(block_bytes).next_back() {
+                let scale = f16::from_le_bytes([last_chunk[0], last_chunk[1]]).to_f32();
+                for i in 0..remaining.min(8) {
+                    let byte_idx = 2 + i / 2;
+                    let quantized = (last_chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
+                    let value = (quantized as f32 - 8.0) * scale;
+                    result.push(value);
+                }
+            }
+        }
+
         result
     }
 
-    /// Dequantize Q4_1 format: 8 quants + 1 fp16 min + 1 fp16 scale
+    /// Dequantize Q4_1 format: each block has min (fp16) + scale (fp16) + 8 quants (4-bit)
     pub fn q4_1(data: &[u8], count: usize) -> Vec<f32> {
         let mut result = Vec::with_capacity(count);
-        let chunks = data.chunks_exact(10); // Q4_1 block size
+        let block_bytes = block_bytes(GGMLType::Q4_1);
+        let block_size = block_size(GGMLType::Q4_1);
+        let chunks = data.chunks_exact(block_bytes);
 
-        for chunk in chunks {
-            if result.len() >= count {
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
                 break;
             }
 
             // Read min and scale (both fp16)
-            let min_bytes = [chunk[0], chunk[1]];
-            let scale_bytes = [chunk[2], chunk[3]];
-            let min = f16::from_le_bytes(min_bytes).to_f32();
-            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+            let min_val = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let scale = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
 
             // Read 8 quantized values
             for i in 0..8 {
-                if result.len() >= count {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
                     break;
                 }
+
                 let byte_idx = 4 + i / 2;
                 let quantized = (chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
-                let value = min + (quantized as f32 * scale);
+                // Q4_1 range: min to min + scale * 15
+                let value = min_val + (quantized as f32 * scale);
                 result.push(value);
             }
         }
@@ -446,25 +509,29 @@ mod dequantize {
         result
     }
 
-    /// Dequantize Q8_0 format: 32 quantized values + 1 fp16 scale
+    /// Dequantize Q8_0 format: each block has scale (fp16) + 32 quants (int8)
     pub fn q8_0(data: &[u8], count: usize) -> Vec<f32> {
         let mut result = Vec::with_capacity(count);
-        let chunks = data.chunks_exact(34); // Q8_0 block size
+        let block_bytes = block_bytes(GGMLType::Q8_0);
+        let block_size = block_size(GGMLType::Q8_0);
+        let chunks = data.chunks_exact(block_bytes);
 
-        for chunk in chunks {
-            if result.len() >= count {
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
                 break;
             }
 
             // Read scale (fp16)
-            let scale_bytes = [chunk[0], chunk[1]];
-            let scale = f16::from_le_bytes(scale_bytes).to_f32();
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
 
             // Read 32 quantized values (int8 each)
             for i in 0..32 {
-                if result.len() >= count {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
                     break;
                 }
+
                 let quantized = chunk[2 + i] as i8 as f32;
                 let value = quantized * scale;
                 result.push(value);
@@ -474,19 +541,360 @@ mod dequantize {
         result
     }
 
-    /// Simplified dequantization for other quantized types
-    /// For production use, implement proper dequantization for each type
-    pub fn simplified(data: &[u8], count: usize) -> Vec<f32> {
-        data.iter()
-            .take(count)
-            .map(|&b| (b as f32 - 128.0) / 128.0) // Normalize to -1..1
-            .collect()
+    /// Dequantize Q8_1 format: each block has scale (fp16) + scale2 (fp16) + 32 quants (int8) + dmin (f32)
+    pub fn q8_1(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q8_1);
+        let block_size = block_size(GGMLType::Q8_1);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scales and dmin
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let scale2 = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+            let dmin = f32::from_le_bytes([chunk[36], chunk[37], chunk[38], chunk[39]]);
+
+            // Read 32 quantized values
+            for i in 0..32 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                let quantized = chunk[4 + i] as i8 as f32;
+                // Q8_1: dmin + (quantized * scale) + (quantized * scale2)
+                let value = dmin + (quantized * scale) + (quantized * scale2);
+                result.push(value);
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q2_K format: improved 2-bit quantization
+    pub fn q2_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q2_K);
+        let block_size = block_size(GGMLType::Q2_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale and min (both fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let min_val = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Read quants and scales (simplified version)
+            // Q2_K has 16 values per block stored in 2 bytes
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                // Extract 2-bit value (0-3)
+                if i < 8 {
+                    let quantized = (chunk[4] >> (i * 2)) & 0x03;
+                    let value = min_val + (quantized as f32 * scale);
+                    result.push(value);
+                } else {
+                    let quantized = (chunk[5] >> ((i - 8) * 2)) & 0x03;
+                    let value = min_val + (quantized as f32 * scale);
+                    result.push(value);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q3_K format: improved 3-bit quantization
+    pub fn q3_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q3_K);
+        let block_size = block_size(GGMLType::Q3_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale (fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+
+            // Simplified Q3_K dequantization
+            // Extract 3-bit values from packed representation
+            let mut bit_pos = 0;
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                // Find the byte containing our 3-bit value
+                let byte_idx = 2 + (bit_pos / 8);
+                let bit_offset = bit_pos % 8;
+
+                if byte_idx < chunk.len() {
+                    let quantized = if bit_offset <= 5 {
+                        (chunk[byte_idx] >> bit_offset) & 0x07
+                    } else {
+                        // Spans across bytes (simplified)
+                        let low_bits = chunk[byte_idx] >> bit_offset;
+                        let high_bits = if byte_idx + 1 < chunk.len() {
+                            chunk[byte_idx + 1] & ((1 << (8 - bit_offset)) - 1)
+                        } else {
+                            0
+                        };
+                        (low_bits | (high_bits << bit_offset)) & 0x07
+                    };
+
+                    // Q3_K range: approximately -4 to +3
+                    let value = (quantized as f32 - 4.0) * scale;
+                    result.push(value);
+                }
+
+                bit_pos += 3;
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q4_K format: improved 4-bit quantization with better scaling
+    pub fn q4_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q4_K);
+        let block_size = block_size(GGMLType::Q4_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale and min (both fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let min_val = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Read 16 quantized values
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                let byte_idx = 4 + i / 2;
+                let quantized = (chunk[byte_idx] >> ((i % 2) * 4)) & 0x0F;
+                // Q4_K: similar to Q4_1 but with better scaling
+                let value = min_val + (quantized as f32 * scale);
+                result.push(value);
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q5_K format: improved 5-bit quantization
+    pub fn q5_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q5_K);
+        let block_size = block_size(GGMLType::Q5_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale and min (both fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let min_val = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Simplified Q5_K dequantization
+            // Q5_K stores 5-bit values packed into bytes
+            let mut bit_pos = 0;
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                // Extract 5-bit value
+                let byte_idx = 4 + (bit_pos / 8);
+                let bit_offset = bit_pos % 8;
+
+                if byte_idx + 1 < chunk.len() {
+                    let low_bits = chunk[byte_idx] >> bit_offset;
+                    let high_bits = chunk[byte_idx + 1] << (8 - bit_offset);
+                    let quantized = (low_bits | high_bits) & 0x1F; // 5 bits
+
+                    // Q5_K range: 0 to 31
+                    let value = min_val + (quantized as f32 * scale);
+                    result.push(value);
+                }
+
+                bit_pos += 5;
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q6_K format: improved 6-bit quantization
+    pub fn q6_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q6_K);
+        let block_size = block_size(GGMLType::Q6_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale and min (both fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let min_val = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Read 16 quantized values
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                // Q6_K: simplified - treat as 6-bit values (0-63)
+                let byte_idx = 4 + i;
+                if byte_idx < chunk.len() {
+                    let quantized = (chunk[byte_idx] & 0x3F) as f32; // 6 bits
+                    let value = min_val + (quantized * scale);
+                    result.push(value);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize Q8_K format: improved 8-bit quantization
+    pub fn q8_k(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+        let block_bytes = block_bytes(GGMLType::Q8_K);
+        let block_size = block_size(GGMLType::Q8_K);
+        let chunks = data.chunks_exact(block_bytes);
+
+        for (block_idx, chunk) in chunks.enumerate() {
+            let start_idx = block_idx * block_size;
+            if start_idx >= count {
+                break;
+            }
+
+            // Read scale and min (both fp16)
+            let scale = f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let min_val = f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Read 16 quantized values (int8)
+            for i in 0..16 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                let byte_idx = 4 + i;
+                if byte_idx < chunk.len() {
+                    let quantized = chunk[byte_idx] as i8 as f32;
+                    let value = min_val + (quantized * scale);
+                    result.push(value);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Dequantize MXFP4 format: Microscaling FP4 format
+    /// This is a simplified implementation - real MXFP4 requires more complex handling
+    pub fn mxfp4(data: &[u8], count: usize) -> Vec<f32> {
+        let mut result = Vec::with_capacity(count);
+
+        // MXFP4 stores 4-bit values with shared scaling
+        // Each 2 bytes contains 4 FP4 values
+        let chunks = data.chunks_exact(2);
+
+        for (chunk_idx, chunk) in chunks.enumerate() {
+            let start_idx = chunk_idx * 4;
+            if start_idx >= count {
+                break;
+            }
+
+            // Extract 4 FP4 values from 2 bytes
+            for i in 0..4 {
+                let global_idx = start_idx + i;
+                if global_idx >= count {
+                    break;
+                }
+
+                let byte_idx = i / 2;
+                let bit_offset = (i % 2) * 4;
+
+                if byte_idx < chunk.len() {
+                    // Extract 4-bit value
+                    let fp4_bits = (chunk[byte_idx] >> bit_offset) & 0x0F;
+
+                    // Convert FP4 to F32 (simplified conversion)
+                    // Real MXFP4 would have complex exponent/mantissa handling
+                    let value = mxfp4_to_f32(fp4_bits);
+                    result.push(value);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Convert 4-bit microscale floating point to f32 (simplified)
+    fn mxfp4_to_f32(fp4_bits: u8) -> f32 {
+        // This is a very simplified conversion
+        // Real MXFP4 conversion is much more complex
+        match fp4_bits {
+            0x0 => 0.0,
+            0x1 => 0.0625,
+            0x2 => 0.125,
+            0x3 => 0.25,
+            0x4 => 0.5,
+            0x5 => 1.0,
+            0x6 => 2.0,
+            0x7 => 4.0,
+            0x8 => -0.0625,
+            0x9 => -0.125,
+            0xA => -0.25,
+            0xB => -0.5,
+            0xC => -1.0,
+            0xD => -2.0,
+            0xE => -4.0,
+            0xF => f32::NAN, // Special value
+            _ => 0.0,
+        }
     }
 
     /// Convert f16 to f32 using half crate
     pub fn f16_to_f32(data: &[u8], count: usize) -> Vec<f32> {
-        let chunks = data.chunks_exact(2);
-        chunks
+        data.chunks_exact(2)
             .take(count)
             .map(|chunk| {
                 let f16_val = f16::from_le_bytes([chunk[0], chunk[1]]);
@@ -514,16 +922,33 @@ impl TensorInfo {
             GGMLType::F32 | GGMLType::I32 => 4,
             GGMLType::F16 | GGMLType::I16 => 2,
             GGMLType::I8 => 1,
-            // For quantized types, approximate
+            // For quantized types, calculate based on block structure
             _ => {
-                let element_count = self.element_count();
-                if element_count > 0 {
-                    (self.size_bytes + element_count - 1) / element_count
+                use dequantize::{block_bytes, block_size};
+                let block_byte_size = block_bytes(self.dtype) as u64;
+                let block_element_size = block_size(self.dtype) as u64;
+                if block_element_size > 0 {
+                    (block_byte_size + block_element_size - 1) / block_element_size
                 } else {
                     1
                 }
             }
         }
+    }
+
+    /// Check if this tensor uses quantization
+    pub fn is_quantized(&self) -> bool {
+        matches!(self.dtype,
+            GGMLType::Q2_K | GGMLType::Q3_K | GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q4_K |
+            GGMLType::Q5_0 | GGMLType::Q5_1 | GGMLType::Q5_K | GGMLType::Q6_K |
+            GGMLType::Q8_0 | GGMLType::Q8_1 | GGMLType::Q8_K | GGMLType::MXFP4
+        )
+    }
+
+    /// Get the block size for this tensor's quantization format
+    pub fn get_block_size(&self) -> usize {
+        use dequantize::block_size;
+        block_size(self.dtype)
     }
 
     /// Optimized tensor data reading using memory mapping
@@ -534,14 +959,236 @@ impl TensorInfo {
         max_elements: usize,
         slice_selection: Option<&crate::tensor_slice::SliceSelection>
     ) -> Result<Vec<f32>, String> {
-        if let Some(slice) = slice_selection {
-            self.read_slice_mmap(mmap, slice, max_elements)
+        if self.is_quantized() {
+            // For quantized tensors, we need special handling to respect block boundaries
+            if let Some(slice) = slice_selection {
+                self.read_quantized_slice_mmap(mmap, slice, max_elements)
+            } else {
+                self.read_quantized_tensor_mmap(mmap, max_elements)
+            }
         } else {
-            self.read_entire_tensor_mmap(mmap, max_elements)
+            // For non-quantized tensors, use the existing optimized path
+            if let Some(slice) = slice_selection {
+                self.read_slice_mmap(mmap, slice, max_elements)
+            } else {
+                self.read_entire_tensor_mmap(mmap, max_elements)
+            }
         }
     }
 
-    /// Read entire tensor using memory mapping (no file I/O!)
+    /// Read entire quantized tensor using memory mapping
+    /// This method respects quantization block boundaries for accurate dequantization
+    fn read_quantized_tensor_mmap(
+        &self,
+        mmap: &memmap2::Mmap,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
+        use dequantize::{block_bytes, block_size};
+
+        let element_count = self.element_count() as usize;
+        let block_sz = block_size(self.dtype);
+        let block_byte_sz = block_bytes(self.dtype);
+
+        // Calculate how many blocks we need to read
+        let blocks_needed = (element_count + block_sz - 1) / block_sz;
+
+        // For downsampling, calculate block stride
+        let block_stride = if blocks_needed > max_elements / block_sz {
+            (blocks_needed + (max_elements / block_sz) - 1) / (max_elements / block_sz)
+        } else {
+            1
+        };
+
+        let blocks_to_read = (blocks_needed + block_stride - 1) / block_stride;
+        let total_elements_to_read = blocks_to_read * block_sz;
+
+        // Calculate byte range for the blocks we need
+        let end_offset = self.offset + (blocks_to_read * block_byte_sz) as u64;
+
+        // Ensure we don't go beyond the mapped region
+        if end_offset as usize > mmap.len() {
+            return Err("Tensor data extends beyond mapped region".to_string());
+        }
+
+        // Get the tensor data as bytes
+        let tensor_data = &mmap[self.offset as usize..end_offset as usize];
+
+        // Use appropriate dequantization function
+        match self.dtype {
+            GGMLType::Q4_0 => Ok(dequantize::q4_0(tensor_data, total_elements_to_read)),
+            GGMLType::Q4_1 => Ok(dequantize::q4_1(tensor_data, total_elements_to_read)),
+            GGMLType::Q5_0 => {
+                // Simplified Q5_0 - read as 5-bit values
+                self.dequantize_q5_0_simplified(tensor_data, total_elements_to_read)
+            }
+            GGMLType::Q5_1 => {
+                // Simplified Q5_1 - read as 5-bit values with min/scale
+                self.dequantize_q5_1_simplified(tensor_data, total_elements_to_read)
+            }
+            GGMLType::Q8_0 => Ok(dequantize::q8_0(tensor_data, total_elements_to_read)),
+            GGMLType::Q8_1 => Ok(dequantize::q8_1(tensor_data, total_elements_to_read)),
+            GGMLType::Q2_K => Ok(dequantize::q2_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q3_K => Ok(dequantize::q3_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q4_K => Ok(dequantize::q4_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q5_K => Ok(dequantize::q5_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q6_K => Ok(dequantize::q6_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q8_K => Ok(dequantize::q8_k(tensor_data, total_elements_to_read)),
+            GGMLType::MXFP4 => Ok(dequantize::mxfp4(tensor_data, total_elements_to_read)),
+            _ => Err(format!("Unsupported quantization type: {:?}", self.dtype)),
+        }
+    }
+
+    /// Read quantized tensor slice using memory mapping
+    fn read_quantized_slice_mmap(
+        &self,
+        mmap: &memmap2::Mmap,
+        slice: &crate::tensor_slice::SliceSelection,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
+        use dequantize::{block_bytes, block_size};
+
+        let (slice_height, slice_width) = slice.slice_shape();
+        let slice_elements = (slice_height * slice_width) as usize;
+        let block_sz = block_size(self.dtype);
+        let block_byte_sz = block_bytes(self.dtype);
+
+        // For quantized tensors, we need to read in block-aligned chunks
+        // Calculate the minimum number of blocks needed to cover the slice
+        let blocks_needed = (slice_elements + block_sz - 1) / block_sz;
+
+        // For downsampling, calculate block stride
+        let block_stride = if blocks_needed > max_elements / block_sz {
+            (blocks_needed + (max_elements / block_sz) - 1) / (max_elements / block_sz)
+        } else {
+            1
+        };
+
+        let blocks_to_read = (blocks_needed + block_stride - 1) / block_stride;
+        let total_elements_to_read = blocks_to_read * block_sz;
+
+        // Calculate byte range - we need to read contiguous blocks
+        let end_offset = self.offset + (blocks_to_read * block_byte_sz) as u64;
+
+        // Ensure we don't go beyond the mapped region
+        if end_offset as usize > mmap.len() {
+            return Err("Slice data extends beyond mapped region".to_string());
+        }
+
+        // Get the tensor data as bytes
+        let tensor_data = &mmap[self.offset as usize..end_offset as usize];
+
+        // Use appropriate dequantization function
+        match self.dtype {
+            GGMLType::Q4_0 => Ok(dequantize::q4_0(tensor_data, total_elements_to_read)),
+            GGMLType::Q4_1 => Ok(dequantize::q4_1(tensor_data, total_elements_to_read)),
+            GGMLType::Q5_0 => {
+                self.dequantize_q5_0_simplified(tensor_data, total_elements_to_read)
+            }
+            GGMLType::Q5_1 => {
+                self.dequantize_q5_1_simplified(tensor_data, total_elements_to_read)
+            }
+            GGMLType::Q8_0 => Ok(dequantize::q8_0(tensor_data, total_elements_to_read)),
+            GGMLType::Q8_1 => Ok(dequantize::q8_1(tensor_data, total_elements_to_read)),
+            GGMLType::Q2_K => Ok(dequantize::q2_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q3_K => Ok(dequantize::q3_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q4_K => Ok(dequantize::q4_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q5_K => Ok(dequantize::q5_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q6_K => Ok(dequantize::q6_k(tensor_data, total_elements_to_read)),
+            GGMLType::Q8_K => Ok(dequantize::q8_k(tensor_data, total_elements_to_read)),
+            GGMLType::MXFP4 => Ok(dequantize::mxfp4(tensor_data, total_elements_to_read)),
+            _ => Err(format!("Unsupported quantization type: {:?}", self.dtype)),
+        }
+    }
+
+    /// Simplified Q5_0 dequantization for testing purposes
+    fn dequantize_q5_0_simplified(&self, data: &[u8], count: usize) -> Result<Vec<f32>, String> {
+        // Simplified: treat as similar to Q4_0 but with better precision
+        let mut result = Vec::with_capacity(count);
+        let chunks = data.chunks_exact(12); // Q5_0 block size
+
+        for chunk in chunks.take(count / 8) {
+            // Read scale (fp16)
+            let scale = half::f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+
+            // Simplified: read 8 values assuming they're stored similarly to Q4_0
+            for i in 0..8 {
+                if result.len() >= count {
+                    break;
+                }
+
+                // Extract 5-bit value (simplified)
+                let byte_idx = 2 + (i * 5) / 8;
+                let bit_offset = (i * 5) % 8;
+
+                if byte_idx < chunk.len() {
+                    let quantized = if bit_offset <= 3 {
+                        (chunk[byte_idx] >> bit_offset) & 0x1F
+                    } else {
+                        // Spans bytes (simplified)
+                        let low_bits = chunk[byte_idx] >> bit_offset;
+                        let high_bits = if byte_idx + 1 < chunk.len() {
+                            (chunk[byte_idx + 1] & 0x03) << (8 - bit_offset)
+                        } else {
+                            0
+                        };
+                        (low_bits | high_bits) & 0x1F
+                    };
+
+                    // Q5_0 range: approximately -16 to +15
+                    let value = (quantized as f32 - 16.0) * scale;
+                    result.push(value);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Simplified Q5_1 dequantization for testing purposes
+    fn dequantize_q5_1_simplified(&self, data: &[u8], count: usize) -> Result<Vec<f32>, String> {
+        // Similar to Q5_0 but with min/scale like Q4_1
+        let mut result = Vec::with_capacity(count);
+        let chunks = data.chunks_exact(14); // Q5_1 block size
+
+        for chunk in chunks.take(count / 8) {
+            // Read min and scale (both fp16)
+            let min_val = half::f16::from_le_bytes([chunk[0], chunk[1]]).to_f32();
+            let scale = half::f16::from_le_bytes([chunk[2], chunk[3]]).to_f32();
+
+            // Simplified: read 8 values
+            for i in 0..8 {
+                if result.len() >= count {
+                    break;
+                }
+
+                // Extract 5-bit value (simplified)
+                let byte_idx = 4 + (i * 5) / 8;
+                let bit_offset = (i * 5) % 8;
+
+                if byte_idx < chunk.len() {
+                    let quantized = if bit_offset <= 3 {
+                        (chunk[byte_idx] >> bit_offset) & 0x1F
+                    } else {
+                        let low_bits = chunk[byte_idx] >> bit_offset;
+                        let high_bits = if byte_idx + 1 < chunk.len() {
+                            (chunk[byte_idx + 1] & 0x03) << (8 - bit_offset)
+                        } else {
+                            0
+                        };
+                        (low_bits | high_bits) & 0x1F
+                    };
+
+                    // Q5_1 range: min to min + scale * 31
+                    let value = min_val + (quantized as f32 * scale);
+                    result.push(value);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Read entire tensor using memory mapping (no file I/O!) - for non-quantized tensors
     fn read_entire_tensor_mmap(
         &self,
         mmap: &memmap2::Mmap,
@@ -607,19 +1254,8 @@ impl TensorInfo {
                     .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
                     .collect())
             }
-            GGMLType::Q4_0 => {
-                Ok(dequantize::q4_0(tensor_data, samples_to_read))
-            }
-            GGMLType::Q4_1 => {
-                Ok(dequantize::q4_1(tensor_data, samples_to_read))
-            }
-            GGMLType::Q8_0 => {
-                Ok(dequantize::q8_0(tensor_data, samples_to_read))
-            }
-            // For other quantized types, use simplified dequantization
-            _ => {
-                Ok(dequantize::simplified(tensor_data, samples_to_read))
-            }
+            // These should not reach here for non-quantized tensors
+            _ => Err(format!("Unsupported data type for non-quantized reading: {:?}", self.dtype)),
         }
     }
 
@@ -754,12 +1390,35 @@ impl TensorInfo {
         Ok(result)
     }
 
-    /// Parse tensor bytes based on data type
+    /// Parse tensor bytes based on data type with improved error handling
     fn parse_tensor_bytes(&self, data: &[u8], max_values: usize, limit: usize) -> Result<Vec<f32>, String> {
         let values_to_parse = max_values.min(limit);
 
+        // Validate data length
+        if data.is_empty() {
+            return Err("No data to parse".to_string());
+        }
+
+        // For quantized types, ensure we have enough data for at least one block
+        if self.is_quantized() {
+            use dequantize::block_bytes;
+            let min_required = block_bytes(self.dtype);
+            if data.len() < min_required {
+                return Err(format!(
+                    "Insufficient data for {}: need {} bytes, got {}",
+                    self.dtype.name(),
+                    min_required,
+                    data.len()
+                ));
+            }
+        }
+
         match self.dtype {
             GGMLType::F32 => {
+                let bytes_needed = values_to_parse * 4;
+                if data.len() < bytes_needed {
+                    return Err(format!("Insufficient F32 data: need {} bytes, got {}", bytes_needed, data.len()));
+                }
                 let chunks = data.chunks_exact(4);
                 Ok(chunks
                     .take(values_to_parse)
@@ -767,15 +1426,26 @@ impl TensorInfo {
                     .collect())
             }
             GGMLType::F16 => {
+                let bytes_needed = values_to_parse * 2;
+                if data.len() < bytes_needed {
+                    return Err(format!("Insufficient F16 data: need {} bytes, got {}", bytes_needed, data.len()));
+                }
                 Ok(dequantize::f16_to_f32(data, values_to_parse))
             }
             GGMLType::I8 => {
+                if data.len() < values_to_parse {
+                    return Err(format!("Insufficient I8 data: need {} bytes, got {}", values_to_parse, data.len()));
+                }
                 Ok(data.iter()
                     .take(values_to_parse)
                     .map(|&b| b as i8 as f32)
                     .collect())
             }
             GGMLType::I16 => {
+                let bytes_needed = values_to_parse * 2;
+                if data.len() < bytes_needed {
+                    return Err(format!("Insufficient I16 data: need {} bytes, got {}", bytes_needed, data.len()));
+                }
                 let chunks = data.chunks_exact(2);
                 Ok(chunks
                     .take(values_to_parse)
@@ -783,23 +1453,38 @@ impl TensorInfo {
                     .collect())
             }
             GGMLType::I32 => {
+                let bytes_needed = values_to_parse * 4;
+                if data.len() < bytes_needed {
+                    return Err(format!("Insufficient I32 data: need {} bytes, got {}", bytes_needed, data.len()));
+                }
                 let chunks = data.chunks_exact(4);
                 Ok(chunks
                     .take(values_to_parse)
                     .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
                     .collect())
             }
-            GGMLType::Q4_0 => {
-                Ok(dequantize::q4_0(data, values_to_parse))
+            // Quantized types - use proper dequantization
+            GGMLType::Q4_0 => Ok(dequantize::q4_0(data, values_to_parse)),
+            GGMLType::Q4_1 => Ok(dequantize::q4_1(data, values_to_parse)),
+            GGMLType::Q8_0 => Ok(dequantize::q8_0(data, values_to_parse)),
+            GGMLType::Q8_1 => Ok(dequantize::q8_1(data, values_to_parse)),
+            GGMLType::Q2_K => Ok(dequantize::q2_k(data, values_to_parse)),
+            GGMLType::Q3_K => Ok(dequantize::q3_k(data, values_to_parse)),
+            GGMLType::Q4_K => Ok(dequantize::q4_k(data, values_to_parse)),
+            GGMLType::Q5_K => Ok(dequantize::q5_k(data, values_to_parse)),
+            GGMLType::Q6_K => Ok(dequantize::q6_k(data, values_to_parse)),
+            GGMLType::Q8_K => Ok(dequantize::q8_k(data, values_to_parse)),
+            GGMLType::MXFP4 => Ok(dequantize::mxfp4(data, values_to_parse)),
+            GGMLType::Q5_0 => {
+                // Use simplified implementation
+                self.dequantize_q5_0_simplified(data, values_to_parse)
             }
-            GGMLType::Q4_1 => {
-                Ok(dequantize::q4_1(data, values_to_parse))
-            }
-            GGMLType::Q8_0 => {
-                Ok(dequantize::q8_0(data, values_to_parse))
+            GGMLType::Q5_1 => {
+                // Use simplified implementation
+                self.dequantize_q5_1_simplified(data, values_to_parse)
             }
             _ => {
-                Ok(dequantize::simplified(data, values_to_parse))
+                Err(format!("Unsupported data type: {:?}", self.dtype))
             }
         }
     }

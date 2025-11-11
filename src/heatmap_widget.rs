@@ -5,10 +5,12 @@ use std::rc::Rc;
 use crate::tensor_slice::SliceSelection;
 
 /// Configuration for heatmap rendering
-const MAX_HEATMAP_DIMENSION: usize = 256; // Max resolution for heatmap visualization
-const MIN_CELL_SIZE: f64 = 2.0; // Minimum pixel size for each cell
-const MAX_DISPLAY_WIDTH: f64 = 400.0; // Maximum widget width
-const MAX_DISPLAY_HEIGHT: f64 = 400.0; // Maximum widget height
+const MAX_HEATMAP_DIMENSION: usize = 2000; // Max resolution for heatmap visualization (2K x 2K)
+const MIN_CELL_SIZE: f64 = 1.0; // Minimum pixel size for each cell (prevents too small cells)
+const MAX_DISPLAY_WIDTH: f64 = 600.0; // Maximum widget width (reasonable size for UI)
+const MAX_DISPLAY_HEIGHT: f64 = 600.0; // Maximum widget height (reasonable size for UI)
+const VIEWPORT_WIDTH: f64 = 500.0; // Default viewport width for large tensors
+const VIEWPORT_HEIGHT: f64 = 400.0; // Default viewport height for large tensors
 
 #[derive(Debug, Clone)]
 pub struct TensorStatistics {
@@ -54,8 +56,18 @@ impl HeatmapWidget {
         let container = GtkBox::new(Orientation::Vertical, 8);
 
         let drawing_area = DrawingArea::new();
-        drawing_area.set_content_width(400);
-        drawing_area.set_content_height(400);
+
+        // Set strict size constraints to prevent layout crashes
+        drawing_area.set_content_width(
+            (VIEWPORT_WIDTH as i32).min(500)
+        );
+        drawing_area.set_content_height(
+            (VIEWPORT_HEIGHT as i32).min(400)
+        );
+        drawing_area.set_size_request(
+            (VIEWPORT_WIDTH as i32).min(600),
+            (VIEWPORT_HEIGHT as i32).min(500)
+        );
 
         let data = Rc::new(RefCell::new(None));
         let display_mode = Rc::new(RefCell::new(DisplayMode::Heatmap));
@@ -209,59 +221,62 @@ impl HeatmapWidget {
             slider.set_value_pos(gtk::PositionType::Right);
             slider.set_digits(0);
 
-            // Value changed handler - must be connected BEFORE setting value
+            // Simple approach: set value first, then connect handler
             let active_sel_weak = Rc::downgrade(&self.active_selection);
             let callback_weak = Rc::downgrade(&self.on_slice_change);
             let slice_selection_weak = Rc::downgrade(&self.slice_selection);
-            let is_initializing = Rc::new(RefCell::new(true)); // Prevent callback during init
-            let init_flag = Rc::clone(&is_initializing);
 
+            // Set initial value BEFORE connecting handler
+            slider.set_value(current_idx as f64);
+
+            // Now connect the handler
             slider.connect_value_changed(move |scale| {
-                // Skip callback if we're still initializing
-                if *init_flag.borrow() {
-                    return;
-                }
-
                 let new_idx = scale.value() as u64;
                 eprintln!("SLIDER CHANGED: dim={}, value={}", dim_idx, new_idx);
 
-                if let Some(active_sel_rc) = active_sel_weak.upgrade() {
-                    if let Some(ref mut sel) = *active_sel_rc.borrow_mut() {
-                        if sel.set_fixed_index(dim_idx, new_idx).is_ok() {
-                            eprintln!("  -> set_fixed_index OK");
+                // Add defensive checks for all weak references
+                let Some(active_sel_rc) = active_sel_weak.upgrade() else {
+                    eprintln!("  -> ERROR: active_sel_weak upgrade failed!");
+                    return;
+                };
 
-                            // Update the stored slice selection
-                            if let Some(sel_storage) = slice_selection_weak.upgrade() {
-                                *sel_storage.borrow_mut() = Some(sel.clone());
-                            }
+                let mut active_sel_guard = active_sel_rc.borrow_mut();
+                let Some(ref mut sel_guard) = active_sel_guard.as_mut() else {
+                    eprintln!("  -> ERROR: active_selection is None!");
+                    return;
+                };
 
-                            // Call the callback to reload data
-                            if let Some(callback_rc) = callback_weak.upgrade() {
-                                if let Some(ref callback) = *callback_rc.borrow() {
-                                    eprintln!("  -> Calling reload callback");
-                                    callback(sel.clone());
-                                } else {
-                                    eprintln!("  -> ERROR: Callback is None!");
-                                }
+                match sel_guard.set_fixed_index(dim_idx, new_idx) {
+                    Ok(()) => {
+                        eprintln!("  -> set_fixed_index OK");
+
+                        // Clone the selection before releasing the borrow
+                        let sel_clone = sel_guard.clone();
+
+                        // Update the stored slice selection
+                        if let Some(sel_storage) = slice_selection_weak.upgrade() {
+                            *sel_storage.borrow_mut() = Some(sel_clone.clone());
+                        }
+
+                        // Call the callback to reload data
+                        if let Some(callback_rc) = callback_weak.upgrade() {
+                            if let Some(ref callback) = *callback_rc.borrow() {
+                                eprintln!("  -> Calling reload callback");
+                                callback(sel_clone);
                             } else {
-                                eprintln!("  -> ERROR: callback_weak upgrade failed!");
+                                eprintln!("  -> WARNING: Callback is None - this might be normal");
                             }
                         } else {
-                            eprintln!("  -> set_fixed_index FAILED");
+                            eprintln!("  -> WARNING: callback_weak upgrade failed - popover might be closing");
                         }
-                    } else {
-                        eprintln!("  -> ERROR: active_selection is None!");
                     }
-                } else {
-                    eprintln!("  -> ERROR: active_sel_weak upgrade failed!");
+                    Err(e) => {
+                        eprintln!("  -> set_fixed_index FAILED: {}", e);
+                    }
                 }
             });
 
-            // Now set the initial value (callback will be skipped due to is_initializing flag)
-            slider.set_value(current_idx as f64);
-
-            // Clear the initialization flag so future changes trigger the callback
-            *is_initializing.borrow_mut() = false;
+            eprintln!("Slider initialization completed for dimension {}", dim_idx);
 
             row.append(&slider);
             controls_box.append(&row);
@@ -280,27 +295,51 @@ impl HeatmapWidget {
     /// Set the tensor data to visualize
     /// Automatically downsamples intelligently based on display resolution
     pub fn set_data(&self, values: Vec<f32>, original_shape: &[u64]) {
+        // Check if tensor is too large for reasonable visualization
+        let total_elements = original_shape.iter().product::<u64>() as usize;
+        if total_elements > 50_000_000 { // 50M elements limit
+            eprintln!("Warning: Tensor with {} elements is very large, applying aggressive downsampling", total_elements);
+        }
+
         let heatmap_data = prepare_heatmap_data(values, original_shape);
 
         if let Some(data) = &heatmap_data {
+            // Verify the resulting heatmap data isn't too large for the widget
+            let heatmap_pixels = data.width * data.height;
+            if heatmap_pixels > 2_000_000 { // 2M pixel limit for heatmap
+                eprintln!("Warning: Heatmap resolution {}x{} ({} pixels) may cause performance issues",
+                    data.width, data.height, heatmap_pixels);
+            }
+
             // Calculate optimal size for the drawing area (add space for legend)
             let aspect_ratio = data.width as f64 / data.height as f64;
             let legend_space = 40.0;
 
             let (content_width, content_height) = if aspect_ratio > 1.0 {
-                // Wider than tall
-                let w = MAX_DISPLAY_WIDTH.min(data.width as f64 * MIN_CELL_SIZE);
-                let h = (w / aspect_ratio).min(MAX_DISPLAY_HEIGHT - legend_space);
+                // Wider than tall - cap at viewport width
+                let w = VIEWPORT_WIDTH.min(data.width as f64 * MIN_CELL_SIZE).min(MAX_DISPLAY_WIDTH);
+                let h = (w / aspect_ratio).min(VIEWPORT_HEIGHT - legend_space).min(MAX_DISPLAY_HEIGHT - legend_space);
                 (w as i32, h as i32 + legend_space as i32)
             } else {
-                // Taller than wide or square
-                let h = (MAX_DISPLAY_HEIGHT - legend_space).min(data.height as f64 * MIN_CELL_SIZE);
-                let w = (h * aspect_ratio).min(MAX_DISPLAY_WIDTH);
+                // Taller than wide or square - cap at viewport height
+                let h = (VIEWPORT_HEIGHT - legend_space).min(data.height as f64 * MIN_CELL_SIZE).min(MAX_DISPLAY_HEIGHT - legend_space);
+                let w = (h * aspect_ratio).min(VIEWPORT_WIDTH).min(MAX_DISPLAY_WIDTH);
                 (w as i32, h as i32 + legend_space as i32)
             };
 
-            self.drawing_area.set_content_width(content_width.max(200).min(MAX_DISPLAY_WIDTH as i32));
-            self.drawing_area.set_content_height(content_height.max(240).min((MAX_DISPLAY_HEIGHT + 40.0) as i32));
+            // Apply strict size constraints to prevent layout crashes
+            let final_width = content_width.max(150).min((VIEWPORT_WIDTH * 1.2) as i32).min(MAX_DISPLAY_WIDTH as i32);
+            let final_height = content_height.max(200).min((VIEWPORT_HEIGHT * 1.2) as i32 + 40).min((MAX_DISPLAY_HEIGHT + 40.0) as i32);
+
+            self.drawing_area.set_content_width(final_width);
+            self.drawing_area.set_content_height(final_height);
+
+            eprintln!("Set heatmap size: {}x{} for tensor shape {:?}", final_width, final_height, original_shape);
+        } else {
+            eprintln!("Error: Failed to prepare heatmap data for tensor with shape {:?}", original_shape);
+            // Set minimal size to prevent crashes
+            self.drawing_area.set_content_width(200);
+            self.drawing_area.set_content_height(150);
         }
 
         *self.data.borrow_mut() = heatmap_data;
@@ -402,23 +441,117 @@ fn prepare_heatmap_data(values: Vec<f32>, shape: &[u64]) -> Option<HeatmapData> 
     })
 }
 
-/// Downsample a 2D array to fit within MAX_HEATMAP_DIMENSION
+/// Intelligent downsampling that preserves tensor structure and important features
 fn downsample_data(values: &[f32], width: usize, height: usize) -> (usize, usize, Vec<f32>) {
-    let scale_w = (width as f64 / MAX_HEATMAP_DIMENSION as f64).ceil();
-    let scale_h = (height as f64 / MAX_HEATMAP_DIMENSION as f64).ceil();
-    let scale = scale_w.max(scale_h) as usize;
+    let total_pixels = width * height;
 
-    let new_width = (width + scale - 1) / scale;
-    let new_height = (height + scale - 1) / scale;
+    // Calculate target resolution based on content and display constraints
+    let (max_width, max_height) = calculate_target_resolution(width, height, total_pixels);
+
+    // If no downsampling needed, return as-is
+    if width <= max_width && height <= max_height {
+        return (width, height, values.to_vec());
+    }
+
+    // Calculate adaptive scaling factors
+    let scale_x = (width as f64 / max_width as f64).ceil() as usize;
+    let scale_y = (height as f64 / max_height as f64).ceil() as usize;
+
+    let new_width = (width + scale_x - 1) / scale_x;
+    let new_height = (height + scale_y - 1) / scale_y;
 
     let mut downsampled = vec![0.0f32; new_width * new_height];
 
-    for out_y in 0..new_height {
+    // Use intelligent downsampling strategy based on scale factor
+    if scale_x <= 2 && scale_y <= 2 {
+        // Light downsampling: use averaging for smooth results
+        average_downsample(values, width, height, scale_x, scale_y, &mut downsampled);
+    } else if scale_x <= 4 && scale_y <= 4 {
+        // Moderate downsampling: use importance-weighted sampling
+        importance_weighted_downsample(values, width, height, scale_x, scale_y, &mut downsampled);
+    } else {
+        // Heavy downsampling: use adaptive stratified sampling
+        adaptive_stratified_downsample(values, width, height, scale_x, scale_y, &mut downsampled);
+    }
+
+    (new_width, new_height, downsampled)
+}
+
+/// Calculate target resolution based on tensor characteristics and display constraints
+fn calculate_target_resolution(width: usize, height: usize, total_pixels: usize) -> (usize, usize) {
+    match total_pixels {
+        // Small tensors: keep original resolution but respect widget limits
+        0..=100_000 => {
+            (width.min(MAX_HEATMAP_DIMENSION), height.min(MAX_HEATMAP_DIMENSION))
+        },
+
+        // Medium tensors: moderate resolution but preserve aspect ratio
+        100_001..=1_000_000 => {
+            let max_dim = 1000.min(MAX_HEATMAP_DIMENSION);
+            let aspect_ratio = width as f64 / height as f64;
+
+            if aspect_ratio > 1.5 {
+                // Wide tensor
+                let new_width = max_dim;
+                let new_height = (max_dim as f64 / aspect_ratio) as usize;
+                (new_width, new_height.max(50)) // Minimum height to avoid tiny strips
+            } else if aspect_ratio < 0.67 {
+                // Tall tensor
+                let new_height = max_dim;
+                let new_width = (max_dim as f64 * aspect_ratio) as usize;
+                (new_width.max(50), new_height) // Minimum width to avoid tiny strips
+            } else {
+                // Balanced: square-ish
+                (max_dim, max_dim)
+            }
+        },
+
+        // Large tensors: capped at reasonable widget size
+        1_000_001..=10_000_000 => {
+            let max_width = (VIEWPORT_WIDTH / MIN_CELL_SIZE) as usize;
+            let max_height = (VIEWPORT_HEIGHT / MIN_CELL_SIZE) as usize;
+            let aspect_ratio = width as f64 / height as f64;
+
+            if aspect_ratio > 2.0 {
+                // Very wide: use viewport width
+                (max_width, ((max_width as f64 / aspect_ratio) as usize).max(30))
+            } else if aspect_ratio < 0.5 {
+                // Very tall: use viewport height
+                (((max_height as f64 * aspect_ratio) as usize).max(30), max_height)
+            } else {
+                // Balanced: fit within viewport
+                (max_width, max_height)
+            }
+        },
+
+        // Very large tensors: strict viewport limits
+        _ => {
+            let viewport_width = (VIEWPORT_WIDTH / MIN_CELL_SIZE) as usize;
+            let viewport_height = (VIEWPORT_HEIGHT / MIN_CELL_SIZE) as usize;
+
+            // Always cap to viewport dimensions
+            (viewport_width, viewport_height)
+        }
+    }
+}
+
+/// Simple averaging downsampling for light scaling (best for small scale factors)
+fn average_downsample(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    scale_x: usize,
+    scale_y: usize,
+    output: &mut [f32]
+) {
+    let new_width = output.len() as usize / ((height + scale_y - 1) / scale_y);
+
+    for out_y in 0..output.len() / new_width {
         for out_x in 0..new_width {
-            let in_x_start = out_x * scale;
-            let in_y_start = out_y * scale;
-            let in_x_end = (in_x_start + scale).min(width);
-            let in_y_end = (in_y_start + scale).min(height);
+            let in_x_start = out_x * scale_x;
+            let in_y_start = out_y * scale_y;
+            let in_x_end = (in_x_start + scale_x).min(width);
+            let in_y_end = (in_y_start + scale_y).min(height);
 
             let mut sum = 0.0f32;
             let mut count = 0;
@@ -434,11 +567,119 @@ fn downsample_data(values: &[f32], width: usize, height: usize) -> (usize, usize
             }
 
             let out_idx = out_y * new_width + out_x;
-            downsampled[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
+            output[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
         }
     }
+}
 
-    (new_width, new_height, downsampled)
+/// Importance-weighted downsampling that preserves significant features
+fn importance_weighted_downsample(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    scale_x: usize,
+    scale_y: usize,
+    output: &mut [f32]
+) {
+    let new_width = output.len() as usize / ((height + scale_y - 1) / scale_y);
+
+    for out_y in 0..output.len() / new_width {
+        for out_x in 0..new_width {
+            let in_x_start = out_x * scale_x;
+            let in_y_start = out_y * scale_y;
+            let in_x_end = (in_x_start + scale_x).min(width);
+            let in_y_end = (in_y_start + scale_y).min(height);
+
+            let mut weighted_sum = 0.0f32;
+            let mut weight_total = 0.0f32;
+
+            for in_y in in_y_start..in_y_end {
+                for in_x in in_x_start..in_x_end {
+                    let idx = in_y * width + in_x;
+                    if idx < values.len() && values[idx].is_finite() {
+                        let value = values[idx];
+                        // Use magnitude-based weighting to preserve significant values
+                        let weight = 1.0 + value.abs().ln_1p(); // ln(1 + |value|)
+                        weighted_sum += value * weight;
+                        weight_total += weight;
+                    }
+                }
+            }
+
+            let out_idx = out_y * new_width + out_x;
+            output[out_idx] = if weight_total > 0.0 { weighted_sum / weight_total } else { 0.0 };
+        }
+    }
+}
+
+/// Adaptive stratified downsampling for very large tensors
+fn adaptive_stratified_downsample(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    scale_x: usize,
+    scale_y: usize,
+    output: &mut [f32]
+) {
+    let new_width = output.len() as usize / ((height + scale_y - 1) / scale_y);
+
+    // For heavy downsampling, use a combination of sampling strategies
+    for out_y in 0..output.len() / new_width {
+        for out_x in 0..new_width {
+            let in_x_start = out_x * scale_x;
+            let in_y_start = out_y * scale_y;
+            let in_x_end = (in_x_start + scale_x).min(width);
+            let in_y_end = (in_y_start + scale_y).min(height);
+
+            // Collect samples from the region
+            let mut samples = Vec::new();
+
+            // Always include corners (structural importance)
+            for &(y, x) in &[(in_y_start, in_x_start), (in_y_start, in_x_end-1),
+                             (in_y_end-1, in_x_start), (in_y_end-1, in_x_end-1)] {
+                if y < height && x < width {
+                    let idx = y * width + x;
+                    if idx < values.len() && values[idx].is_finite() {
+                        samples.push(values[idx]);
+                    }
+                }
+            }
+
+            // Include center (representative)
+            let center_y = (in_y_start + in_y_end) / 2;
+            let center_x = (in_x_start + in_x_end) / 2;
+            if center_y < height && center_x < width {
+                let idx = center_y * width + center_x;
+                if idx < values.len() && values[idx].is_finite() {
+                    samples.push(values[idx]);
+                }
+            }
+
+            // Add deterministic samples within the region for statistical representation
+            let random_samples = 3.min((in_x_end - in_x_start) * (in_y_end - in_y_start) / 4);
+            for i in 0..random_samples {
+                // Use simple hash-based deterministic sampling
+                let seed = (out_y * new_width + out_x) * 7 + i * 13;
+                let rand_y = in_y_start + (seed % (in_y_end - in_y_start).max(1));
+                let rand_x = in_x_start + ((seed * 17) % (in_x_end - in_x_start).max(1));
+                if rand_y < height && rand_x < width {
+                    let idx = rand_y * width + rand_x;
+                    if idx < values.len() && values[idx].is_finite() {
+                        samples.push(values[idx]);
+                    }
+                }
+            }
+
+            // Use weighted median of samples for robustness
+            let out_idx = out_y * new_width + out_x;
+            if samples.is_empty() {
+                output[out_idx] = 0.0;
+            } else {
+                samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                output[out_idx] = samples[samples.len() / 2]; // Median
+            }
+        }
+    }
 }
 
 fn draw_heatmap(cr: &gtk::cairo::Context, width: i32, height: i32, data: &HeatmapData) {

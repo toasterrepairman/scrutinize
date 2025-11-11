@@ -17,6 +17,40 @@ pub struct TensorPage {
     file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
+/// Calculate adaptive maximum elements based on tensor size and display constraints
+/// Implements intelligent scaling to preserve structure while maintaining performance
+fn calculate_adaptive_max_elements(total_elements: usize) -> usize {
+    // Base limits for different size categories - more conservative to prevent crashes
+    match total_elements {
+        // Small tensors: show everything, no downsampling needed
+        0..=25_000 => total_elements,
+
+        // Medium tensors: allow up to 500K elements for good detail
+        25_001..=500_000 => {
+            // Calculate reasonable limit that preserves detail but fits in widget
+            std::cmp::min(total_elements, 500_000)
+        }
+
+        // Large tensors: smart downsampling with reasonable limits
+        500_001..=5_000_000 => {
+            // Allow up to 1M elements with smart downsampling
+            std::cmp::min(total_elements, 1_000_000)
+        }
+
+        // Very large tensors: aggressive downsampling to fit viewport
+        5_000_001..=50_000_000 => {
+            // Target ~1K x 1K resolution max = 1M elements
+            1_000_000
+        }
+
+        // Extremely large tensors: strict limits to prevent crashes
+        _ => {
+            // Cap at 1.5M elements maximum (fits in ~1200x1200 viewport)
+            1_500_000
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SystemMemoryInfo {
     system_ram_bytes: u64,
@@ -424,9 +458,13 @@ impl TensorPage {
         glib::spawn_future_local(async move {
             use crate::tensor_slice::SliceSelection;
 
-            // Cap at 256x256 = 65,536 elements max for visualization
-            // This provides good quality while keeping performance snappy
-            let max_elements = 256 * 256;
+            // Calculate adaptive max elements based on tensor dimensions
+            // Allow larger tensors but implement intelligent downsampling
+            let total_elements = tensor_clone.dimensions.iter().product::<u64>() as usize;
+            let max_elements = calculate_adaptive_max_elements(total_elements);
+
+            eprintln!("Tensor {} loaded: shape={:?}, total_elements={}, dtype={:?}, max_elements={}",
+                tensor_clone.name, tensor_clone.dimensions, total_elements, tensor_clone.dtype, max_elements);
 
             // Create smart slice selection for 3D+ tensors
             let slice_selection = if tensor_clone.dimensions.len() > 2 {
@@ -471,8 +509,13 @@ impl TensorPage {
 
                 // Spawn async task to reload data
                 glib::spawn_future_local(async move {
-                    // Cap at 256x256 for consistent performance
-                    let max_elements = 256 * 256;
+                    // Calculate adaptive max elements for the new slice
+                    let slice_elements = if let (h, w) = new_selection.slice_shape() {
+                        (h * w) as usize
+                    } else {
+                        tensor.element_count() as usize
+                    };
+                    let max_elements = calculate_adaptive_max_elements(slice_elements);
 
                     // Run blocking I/O in a background thread to avoid blocking UI
                     let (tx, rx) = async_channel::unbounded();
