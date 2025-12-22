@@ -39,6 +39,7 @@ pub struct HeatmapWidget {
 enum DisplayMode {
     Heatmap,
     Histogram,
+    LinePlot,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ impl HeatmapWidget {
                     match *mode_rc.borrow() {
                         DisplayMode::Heatmap => draw_heatmap(cr, width, height, heatmap_data),
                         DisplayMode::Histogram => draw_histogram(cr, width, height, heatmap_data),
+                        DisplayMode::LinePlot => draw_line_plot(cr, width, height, heatmap_data),
                     }
                 } else {
                     // Draw empty state
@@ -115,6 +117,9 @@ impl HeatmapWidget {
                         }
                         DisplayMode::Histogram => {
                             compute_histogram_tooltip(x, y, width, height, heatmap_data)
+                        }
+                        DisplayMode::LinePlot => {
+                            compute_line_plot_tooltip(x, y, width, height, heatmap_data)
                         }
                     };
 
@@ -358,12 +363,13 @@ impl HeatmapWidget {
         self.drawing_area.queue_draw();
     }
 
-    /// Toggle between heatmap and histogram display modes
+    /// Toggle between heatmap/histogram display modes
     pub fn toggle_display_mode(&self) {
         let mut mode = self.display_mode.borrow_mut();
         *mode = match *mode {
             DisplayMode::Heatmap => DisplayMode::Histogram,
             DisplayMode::Histogram => DisplayMode::Heatmap,
+            DisplayMode::LinePlot => DisplayMode::Histogram,
         };
         self.drawing_area.queue_draw();
     }
@@ -377,6 +383,36 @@ impl HeatmapWidget {
         };
         self.drawing_area.queue_draw();
     }
+
+    /// Set display mode to line plot for 1D tensors
+    pub fn set_display_mode_line_plot(&self) {
+        *self.display_mode.borrow_mut() = DisplayMode::LinePlot;
+        self.drawing_area.queue_draw();
+    }
+
+    /// Check if currently in line plot mode
+    pub fn is_line_plot_mode(&self) -> bool {
+        *self.display_mode.borrow() == DisplayMode::LinePlot
+    }
+
+    /// Check if currently in heatmap mode
+    pub fn is_heatmap_mode(&self) -> bool {
+        *self.display_mode.borrow() == DisplayMode::Heatmap
+    }
+
+    /// Check if currently in histogram mode
+    pub fn is_histogram_mode(&self) -> bool {
+        *self.display_mode.borrow() == DisplayMode::Histogram
+    }
+
+    /// Get current display mode as a string (for UI labels)
+    pub fn get_display_mode_label(&self) -> String {
+        match *self.display_mode.borrow() {
+            DisplayMode::Heatmap => "Heatmap".to_string(),
+            DisplayMode::Histogram => "Histogram".to_string(),
+            DisplayMode::LinePlot => "Line Plot".to_string(),
+        }
+    }
 }
 
 /// Prepare and downsample tensor data for heatmap visualization
@@ -385,39 +421,49 @@ fn prepare_heatmap_data(values: Vec<f32>, shape: &[u64]) -> Option<HeatmapData> 
         return None;
     }
 
-    // Determine 2D layout from shape
-    let (width, height) = match shape.len() {
+    // Determine 2D layout from shape and apply appropriate downsampling
+    let (width, height, downsampled_values) = match shape.len() {
         1 => {
-            // 1D tensor - display as a horizontal strip or wrap into 2D
+            // 1D tensor - apply peak-preserving downsampling for large tensors
             let total = shape[0] as usize;
-            if total <= MAX_HEATMAP_DIMENSION {
-                (total, 1)
+            let downsampled = if total > 10_000 {
+                downsample_1d_peak_preserving(values, 10_000.min(total))
             } else {
-                // Wrap into a square-ish shape
-                let side = (total as f64).sqrt().ceil() as usize;
-                (side, (total + side - 1) / side)
+                values
+            };
+            (downsampled.len(), 1, downsampled)
+        },
+        2 => {
+            let width = shape[1] as usize;
+            let height = shape[0] as usize;
+            // Downsample if necessary
+            if width > MAX_HEATMAP_DIMENSION || height > MAX_HEATMAP_DIMENSION {
+                downsample_data(&values, width, height)
+            } else {
+                (width, height, values)
             }
         },
-        2 => (shape[1] as usize, shape[0] as usize),
         3 => {
             // For 3D tensors (e.g., [batch, height, width]), flatten batch dimension
-            (shape[2] as usize, (shape[0] * shape[1]) as usize)
+            let width = shape[2] as usize;
+            let height = (shape[0] * shape[1]) as usize;
+            if width > MAX_HEATMAP_DIMENSION || height > MAX_HEATMAP_DIMENSION {
+                downsample_data(&values, width, height)
+            } else {
+                (width, height, values)
+            }
         },
         _ => {
             // For higher dimensional tensors, flatten all but last two dimensions
-            let w = shape[shape.len() - 1] as usize;
-            let h: usize = shape[..shape.len() - 1].iter().map(|&d| d as usize).product();
-            (w, h)
+            let width = shape[shape.len() - 1] as usize;
+            let height: usize = shape[..shape.len() - 1].iter().map(|&d| d as usize).product();
+            if width > MAX_HEATMAP_DIMENSION || height > MAX_HEATMAP_DIMENSION {
+                downsample_data(&values, width, height)
+            } else {
+                (width, height, values)
+            }
         }
     };
-
-    // Downsample if necessary
-    let (final_width, final_height, downsampled_values) =
-        if width > MAX_HEATMAP_DIMENSION || height > MAX_HEATMAP_DIMENSION {
-            downsample_data(&values, width, height)
-        } else {
-            (width, height, values)
-        };
 
     // Calculate min and max for color mapping
     let min_value = downsampled_values.iter()
@@ -434,8 +480,8 @@ fn prepare_heatmap_data(values: Vec<f32>, shape: &[u64]) -> Option<HeatmapData> 
 
     Some(HeatmapData {
         values: downsampled_values,
-        width: final_width,
-        height: final_height,
+        width,
+        height,
         min_value,
         max_value,
     })
@@ -533,6 +579,157 @@ fn calculate_target_resolution(width: usize, height: usize, total_pixels: usize)
             (viewport_width, viewport_height)
         }
     }
+}
+
+/// Peak-preserving downsampling for 1D tensors (line plots)
+/// Preserves local min/max values to maintain visual features
+/// Size-based strategy:
+/// - ≤10K elements: No downsampling
+/// - 10K-100K: Uniform sampling (simple stride)
+/// - 100K-1M: Peak-preserving (keep min + max from each bucket)
+/// - >1M: Aggressive peak-preserving with larger buckets
+pub fn downsample_1d_peak_preserving(values: Vec<f32>, target_size: usize) -> Vec<f32> {
+    let num_elements = values.len();
+
+    // Small tensors: no downsampling
+    if num_elements <= target_size {
+        return values;
+    }
+
+    // Very large tensors (>1M elements): aggressive peak-preserving
+    if num_elements > 1_000_000 {
+        return downsample_1d_aggressive(values, target_size);
+    }
+
+    // Large tensors (100K-1M): peak-preserving downsampling
+    if num_elements > 100_000 {
+        return downsample_1d_peak_bucket(values, target_size);
+    }
+
+    // Medium tensors (10K-100K): simple uniform sampling
+    downsample_1d_uniform(values, target_size)
+}
+
+/// Uniform sampling for medium-sized 1D tensors
+fn downsample_1d_uniform(values: Vec<f32>, target_size: usize) -> Vec<f32> {
+    let stride = (values.len() + target_size - 1) / target_size;
+    values.into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % stride == 0)
+        .map(|(_, v)| v)
+        .take(target_size)
+        .collect()
+}
+
+/// Peak-preserving bucket downsampling for large 1D tensors
+/// Keeps both min and max from each bucket to preserve peaks and valleys
+fn downsample_1d_peak_bucket(values: Vec<f32>, target_size: usize) -> Vec<f32> {
+    let num_elements = values.len();
+    let bucket_size = (num_elements + target_size - 1) / target_size;
+    let num_buckets = (num_elements + bucket_size - 1) / bucket_size;
+
+    let mut result = Vec::with_capacity(num_buckets * 2);
+
+    for bucket_idx in 0..num_buckets {
+        let start = bucket_idx * bucket_size;
+        let end = (start + bucket_size).min(num_elements);
+
+        if start >= num_elements {
+            break;
+        }
+
+        let bucket = &values[start..end];
+
+        // Find min and max in this bucket
+        let mut min_val = f32::INFINITY;
+        let mut max_val = f32::NEG_INFINITY;
+
+        for &val in bucket {
+            if val.is_finite() {
+                min_val = min_val.min(val);
+                max_val = max_val.max(val);
+            }
+        }
+
+        // Add min and max (preserves peaks and valleys)
+        if min_val.is_finite() {
+            result.push(min_val);
+        }
+        if max_val.is_finite() && max_val != min_val {
+            result.push(max_val);
+        }
+    }
+
+    // If we still have too many points, do a second pass of uniform sampling
+    if result.len() > target_size {
+        let stride = (result.len() + target_size - 1) / target_size;
+        result = result.into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % stride == 0)
+            .map(|(_, v)| v)
+            .collect();
+    }
+
+    result
+}
+
+/// Aggressive peak-preserving for very large 1D tensors (>1M elements)
+/// Uses larger buckets with adaptive sampling within each bucket
+fn downsample_1d_aggressive(values: Vec<f32>, target_size: usize) -> Vec<f32> {
+    let num_elements = values.len();
+    let bucket_size = ((num_elements / target_size) * 4).max(100); // Larger buckets
+    let num_buckets = (num_elements + bucket_size - 1) / bucket_size;
+
+    let mut result = Vec::with_capacity(target_size);
+
+    for bucket_idx in 0..num_buckets {
+        let start = bucket_idx * bucket_size;
+        let end = (start + bucket_size).min(num_elements);
+
+        if start >= num_elements {
+            break;
+        }
+
+        let bucket = &values[start..end];
+
+        // Sample 5 points from each bucket: min, max, and 3 intermediate
+        let mut min_val = f32::INFINITY;
+        let mut max_val = f32::NEG_INFINITY;
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+
+        for &val in bucket {
+            if val.is_finite() {
+                min_val = min_val.min(val);
+                max_val = max_val.max(val);
+                sum += val;
+                count += 1;
+            }
+        }
+
+        // Add min, max, and average
+        if min_val.is_finite() {
+            result.push(min_val);
+        }
+        if count > 0 {
+            result.push(sum / count as f32);
+        }
+        if max_val.is_finite() && max_val != min_val {
+            result.push(max_val);
+        }
+    }
+
+    // Final uniform sampling if still too large
+    if result.len() > target_size {
+        let stride = (result.len() + target_size - 1) / target_size;
+        result = result.into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % stride == 0)
+            .map(|(_, v)| v)
+            .collect();
+    }
+
+    result
 }
 
 /// Simple averaging downsampling for light scaling (best for small scale factors)
@@ -1049,6 +1246,179 @@ fn draw_histogram(cr: &gtk::cairo::Context, width: i32, height: i32, data: &Heat
     let title_extents = cr.text_extents(title).unwrap();
     cr.move_to((width - title_extents.width()) / 2.0, margin - 5.0);
     cr.show_text(title).unwrap();
+}
+
+/// Draw a line plot for 1D tensor values
+fn draw_line_plot(cr: &gtk::cairo::Context, width: i32, height: i32, data: &HeatmapData) {
+    let width = width as f64;
+    let height = height as f64;
+    let margin = 40.0;
+    let bottom_margin = 55.0;
+    let left_margin = 50.0;
+    let right_margin = 20.0;
+    let top_margin = 30.0;
+    let plot_width = width - left_margin - right_margin;
+    let plot_height = height - top_margin - bottom_margin;
+
+    if plot_width <= 0.0 || plot_height <= 0.0 {
+        draw_empty_state(cr, width as i32, height as i32);
+        return;
+    }
+
+    let num_points = data.values.len();
+    if num_points == 0 {
+        draw_empty_state(cr, width as i32, height as i32);
+        return;
+    }
+
+    let value_range = (data.max_value - data.min_value).max(0.0001);
+
+    // Draw background
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.05);
+    cr.rectangle(left_margin, top_margin, plot_width, plot_height);
+    cr.fill().unwrap();
+
+    // Draw grid lines (horizontal)
+    cr.set_source_rgba(0.3, 0.3, 0.3, 0.3);
+    cr.set_line_width(0.5);
+    for i in 0..=4 {
+        let y = top_margin + (plot_height * i as f64 / 4.0);
+        cr.move_to(left_margin, y);
+        cr.line_to(left_margin + plot_width, y);
+        cr.stroke().unwrap();
+    }
+
+    // Draw grid lines (vertical)
+    for i in 0..=10 {
+        let x = left_margin + (plot_width * i as f64 / 10.0);
+        cr.move_to(x, top_margin);
+        cr.line_to(x, top_margin + plot_height);
+        cr.stroke().unwrap();
+    }
+
+    // Draw the line plot using the memory visualizer color gradient
+    cr.set_line_width(1.5);
+    cr.set_source_rgba(0.46, 0.78, 0.39, 1.0); // Green from memory_viz_color_gradient
+
+    // Build the path
+    cr.move_to(
+        left_margin,
+        top_margin + plot_height - ((data.values[0] - data.min_value) / value_range as f32) as f64 * plot_height,
+    );
+
+    for (i, &value) in data.values.iter().enumerate() {
+        if !value.is_finite() {
+            continue;
+        }
+
+        let x = left_margin + (i as f64 / (num_points - 1) as f64) * plot_width;
+        let normalized = ((value - data.min_value) / value_range as f32).clamp(0.0, 1.0);
+        let y = top_margin + plot_height - (normalized as f64 * plot_height);
+
+        cr.line_to(x, y);
+    }
+
+    cr.stroke().unwrap();
+
+    // Draw axes
+    cr.set_source_rgba(0.5, 0.5, 0.5, 0.8);
+    cr.set_line_width(1.5);
+
+    // Y-axis
+    cr.move_to(left_margin, top_margin);
+    cr.line_to(left_margin, top_margin + plot_height);
+    cr.stroke().unwrap();
+
+    // X-axis
+    cr.move_to(left_margin, top_margin + plot_height);
+    cr.line_to(left_margin + plot_width, top_margin + plot_height);
+    cr.stroke().unwrap();
+
+    // Draw labels
+    cr.set_source_rgba(0.8, 0.8, 0.8, 0.9);
+    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
+    cr.set_font_size(9.0);
+
+    // Y-axis labels (value range)
+    for i in 0..=4 {
+        let t = i as f64 / 4.0;
+        let value = data.min_value + (value_range as f32 * t as f32);
+        let text = format!("{:.3}", value);
+        let extents = cr.text_extents(&text).unwrap();
+        let y = top_margin + plot_height - (t * plot_height);
+        cr.move_to(left_margin - extents.width() - 8.0, y + extents.height() / 2.0);
+        cr.show_text(&text).unwrap();
+    }
+
+    // X-axis labels (indices)
+    for i in 0..=5 {
+        let idx = (num_points as f64 * i as f64 / 5.0).round() as usize;
+        let idx = idx.min(num_points - 1);
+        let text = format!("{}", idx);
+        let extents = cr.text_extents(&text).unwrap();
+        let x = left_margin + (i as f64 / 5.0) * plot_width;
+        cr.move_to(x - extents.width() / 2.0, height - bottom_margin + 20.0);
+        cr.show_text(&text).unwrap();
+    }
+
+    // Axis titles
+    cr.set_font_size(10.0);
+    cr.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+
+    // Y-axis title
+    cr.save().unwrap();
+    cr.move_to(12.0, top_margin + plot_height / 2.0);
+    cr.rotate(-std::f64::consts::PI / 2.0);
+    cr.show_text("Value").unwrap();
+    cr.restore().unwrap();
+
+    // X-axis title
+    let x_title = "Index";
+    let x_title_extents = cr.text_extents(x_title).unwrap();
+    cr.move_to(left_margin + plot_width / 2.0 - x_title_extents.width() / 2.0, height - 8.0);
+    cr.show_text(x_title).unwrap();
+
+    // Title
+    cr.set_font_size(11.0);
+    let title = format!("1D Tensor Values ({} points)", num_points);
+    let title_extents = cr.text_extents(&title).unwrap();
+    cr.move_to((width - title_extents.width()) / 2.0, top_margin - 8.0);
+    cr.show_text(&title).unwrap();
+}
+
+/// Compute tooltip text for line plot mode
+/// Returns index and value at mouse position
+fn compute_line_plot_tooltip(x: f64, y: f64, width: f64, height: f64, data: &HeatmapData) -> Option<String> {
+    let left_margin = 50.0;
+    let right_margin = 20.0;
+    let top_margin = 30.0;
+    let bottom_margin = 55.0;
+    let plot_width = width - left_margin - right_margin;
+    let plot_height = height - top_margin - bottom_margin;
+
+    // Check if mouse is in the plot area
+    if x < left_margin || x > left_margin + plot_width || y < top_margin || y > top_margin + plot_height {
+        return None;
+    }
+
+    let num_points = data.values.len();
+    if num_points == 0 {
+        return None;
+    }
+
+    // Find the nearest data point based on x position
+    let relative_x = x - left_margin;
+    let index_ratio = relative_x / plot_width;
+    let index = (index_ratio * (num_points - 1) as f64).round() as usize;
+    let index = index.min(num_points - 1);
+
+    // Get the value at this index
+    let value = data.values.get(index)?;
+    if !value.is_finite() {
+        return Some(format!("Index: {}\nValue: N/A", index));
+    }
+
+    Some(format!("Index: {}\nValue: {:.6}", index, value))
 }
 
 /// Compute tooltip text for heatmap mode

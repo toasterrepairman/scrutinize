@@ -581,6 +581,13 @@ impl TensorPage {
                         tensor_clone.dimensions.clone()
                     };
 
+                    // Auto-detect 1D tensors and switch to line plot mode
+                    let is_1d = tensor_clone.dimensions.len() == 1;
+                    if is_1d {
+                        heatmap_weak.set_display_mode_line_plot();
+                        eprintln!("Tensor {} is 1D, using line plot mode", tensor_clone.name);
+                    }
+
                     heatmap_weak.set_data(data, &display_shape);
                     heatmap_weak.widget().set_visible(true);
 
@@ -593,16 +600,33 @@ impl TensorPage {
                     if let Some(btn) = toggle_btn_weak.upgrade() {
                         btn.set_sensitive(true);
 
+                        // Set initial button label based on tensor dimensionality
+                        if is_1d {
+                            btn.set_label("Histogram"); // 1D starts in Line Plot, so button goes to Histogram
+                        } else {
+                            btn.set_label("Histogram"); // 2D+ starts in Heatmap, so button goes to Histogram
+                        }
+
                         // Connect click handler to toggle display mode
                         let heatmap_for_toggle = heatmap_weak.clone();
                         btn.connect_clicked(move |button| {
                             heatmap_for_toggle.toggle_display_mode();
                             // Update button label based on current mode
-                            let current_label = button.label().unwrap_or_default();
-                            if current_label == "Histogram" {
-                                button.set_label("Heatmap");
-                            } else {
-                                button.set_label("Histogram");
+                            let mode_label = heatmap_for_toggle.get_display_mode_label();
+                            match mode_label.as_str() {
+                                "Line Plot" => button.set_label("Histogram"),
+                                "Histogram" => {
+                                    // Determine next mode based on tensor dimensionality
+                                    if heatmap_for_toggle.is_line_plot_mode() {
+                                        // Was in line plot, go to histogram
+                                        button.set_label("Heatmap");
+                                    } else {
+                                        // Was in heatmap or histogram, toggle between them
+                                        button.set_label("Heatmap");
+                                    }
+                                }
+                                "Heatmap" => button.set_label("Histogram"),
+                                _ => button.set_label("Histogram"),
                             }
                         });
                     }
