@@ -56,3 +56,65 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     transform: translateY(-1px);
 }
+
+/* Tensor Popover Styling */
+.tensor-popover {
+    padding: 0;
+}
+
+.tensor-popover > box {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+/* Tensor type badge */
+.tensor-type-badge {
+    background-color: alpha(@accent_color, 0.15);
+    color: @accent_color;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Popover header separator */
+.popover-header-separator {
+    background-color: alpha(@window_fg_color, 0.1);
+    margin: 0 16px;
+}
+
+/* Visualization mode toggle button */
+button.pill {
+    border-radius: 16px;
+    padding: 6px 16px;
+    font-size: 0.9em;
+    font-weight: 500;
+    transition: all 150ms ease;
+}
+
+button.pill:hover {
+    background-color: alpha(@accent_color, 0.15);
+}
+
+button.pill:active {
+    background-color: alpha(@accent_color, 0.25);
+}
+
+/* Heading labels in popover */
+.heading {
+    font-weight: 600;
+    font-size: 1.05em;
+}
+
+/* Caption/dim-label styling */
+.caption {
+    font-size: 0.9em;
+}
+
+/* Monospace values in metadata */
+.monospace {
+    font-family: "Monospace", "Courier New", monospace;
+    font-size: 0.95em;
+}

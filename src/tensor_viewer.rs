@@ -314,76 +314,127 @@ impl TensorPage {
         let popover = gtk::Popover::new();
         popover.set_parent(parent);
         popover.set_position(gtk::PositionType::Bottom);
-        popover.set_width_request(450);
+        popover.set_width_request(480);
         popover.set_autohide(true);
         popover.set_has_arrow(true);
+        popover.add_css_class("tensor-popover");
 
-        let content = GtkBox::new(Orientation::Vertical, 12);
-        content.set_margin_top(12);
-        content.set_margin_bottom(12);
-        content.set_margin_start(12);
-        content.set_margin_end(12);
+        let content = GtkBox::new(Orientation::Vertical, 0);
 
-        // Title
+        // Header with title and type badge
+        let header_box = GtkBox::new(Orientation::Horizontal, 12);
+        header_box.set_margin_top(16);
+        header_box.set_margin_bottom(12);
+        header_box.set_margin_start(16);
+        header_box.set_margin_end(16);
+
+        let title_box = GtkBox::new(Orientation::Vertical, 4);
+        title_box.set_hexpand(true);
+
         let title = gtk::Label::builder()
-            .label(&format!("<b>{}</b>", glib::markup_escape_text(&tensor.name)))
-            .use_markup(true)
+            .label(&tensor.name)
             .halign(gtk::Align::Start)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .css_classes(vec!["heading".to_string()])
             .build();
-        content.append(&title);
+        title_box.append(&title);
 
-        // Metadata grid
-        let meta_grid = gtk::Grid::builder()
-            .column_spacing(12)
-            .row_spacing(6)
+        let shape_subtitle = gtk::Label::builder()
+            .label(&format!("{}", tensor.shape_string()))
+            .halign(gtk::Align::Start)
+            .css_classes(vec!["dim-label".to_string(), "caption".to_string()])
             .build();
+        title_box.append(&shape_subtitle);
 
-        let labels = [
-            ("Shape:", tensor.shape_string()),
-            ("Type:", tensor.dtype.name().to_string()),
-            ("Elements:", format!("{}", tensor.element_count())),
-            ("Size:", format_bytes(tensor.size_bytes)),
-            ("Offset:", format!("0x{:X}", tensor.offset)),
-        ];
+        header_box.append(&title_box);
 
-        for (row, (key, value)) in labels.iter().enumerate() {
-            let key_label = gtk::Label::builder()
-                .label(*key)
-                .halign(gtk::Align::End)
-                .css_classes(vec!["dim-label".to_string()])
-                .build();
-            let value_label = gtk::Label::builder()
-                .label(value)
-                .halign(gtk::Align::Start)
-                .selectable(true)
-                .build();
+        // Type badge
+        let type_badge = gtk::Label::builder()
+            .label(tensor.dtype.name())
+            .css_classes(vec!["tensor-type-badge".to_string()])
+            .build();
+        header_box.append(&type_badge);
 
-            meta_grid.attach(&key_label, 0, row as i32, 1, 1);
-            meta_grid.attach(&value_label, 1, row as i32, 1, 1);
-        }
-
-        content.append(&meta_grid);
+        content.append(&header_box);
 
         // Separator
-        content.append(&gtk::Separator::new(Orientation::Horizontal));
+        let sep1 = gtk::Separator::new(Orientation::Horizontal);
+        sep1.add_css_class("popover-header-separator");
+        content.append(&sep1);
 
-        // Visualization header with toggle button
+        // Metadata section in a clean grid
+        let meta_box = GtkBox::new(Orientation::Vertical, 8);
+        meta_box.set_margin_top(12);
+        meta_box.set_margin_bottom(12);
+        meta_box.set_margin_start(16);
+        meta_box.set_margin_end(16);
+
+        // Create a 2-column grid for metadata
+        let meta_grid = gtk::Grid::builder()
+            .column_spacing(24)
+            .row_spacing(8)
+            .hexpand(true)
+            .build();
+
+        let metadata_items = [
+            ("Elements", format!("{}", tensor.element_count())),
+            ("Size", format_bytes(tensor.size_bytes)),
+            ("Offset", format!("0x{:X}", tensor.offset)),
+            ("Dimensions", format!("{}", tensor.dimensions.len())),
+        ];
+
+        for (row, (label, value)) in metadata_items.iter().enumerate() {
+            let row_idx = row as i32;
+            let col_idx = (row % 2) as i32;
+
+            let item_box = GtkBox::new(Orientation::Vertical, 2);
+
+            let label_widget = gtk::Label::builder()
+                .label(*label)
+                .halign(gtk::Align::Start)
+                .css_classes(vec!["dim-label".to_string(), "caption".to_string()])
+                .build();
+            item_box.append(&label_widget);
+
+            let value_widget = gtk::Label::builder()
+                .label(value.as_str())
+                .halign(gtk::Align::Start)
+                .selectable(true)
+                .css_classes(vec!["monospace".to_string()])
+                .build();
+            item_box.append(&value_widget);
+
+            meta_grid.attach(&item_box, col_idx, row_idx / 2, 1, 1);
+        }
+
+        meta_box.append(&meta_grid);
+        content.append(&meta_box);
+
+        // Separator
+        let sep2 = gtk::Separator::new(Orientation::Horizontal);
+        content.append(&sep2);
+
+        // Visualization header with mode toggle
         let viz_header = GtkBox::new(Orientation::Horizontal, 8);
+        viz_header.set_margin_top(12);
+        viz_header.set_margin_bottom(8);
+        viz_header.set_margin_start(16);
+        viz_header.set_margin_end(16);
+
         let viz_label = gtk::Label::builder()
-            .label("<b>Tensor Visualization</b>")
-            .use_markup(true)
+            .label("Visualization")
             .halign(gtk::Align::Start)
             .hexpand(true)
+            .css_classes(vec!["heading".to_string()])
             .build();
         viz_header.append(&viz_label);
 
-        // Toggle button for heatmap/histogram
+        // Toggle button for visualization modes
         let toggle_button = gtk::Button::builder()
             .label("Histogram")
             .halign(gtk::Align::End)
-            .css_classes(vec!["flat".to_string()])
+            .css_classes(vec!["flat".to_string(), "pill".to_string()])
             .sensitive(false) // Disabled until data loads
             .build();
         viz_header.append(&toggle_button);
@@ -391,14 +442,15 @@ impl TensorPage {
         content.append(&viz_header);
 
         // Loading indicator with spinner
-        let loading_box = GtkBox::new(Orientation::Horizontal, 8);
+        let loading_box = GtkBox::new(Orientation::Vertical, 8);
         loading_box.set_halign(gtk::Align::Center);
         loading_box.set_valign(gtk::Align::Center);
-        loading_box.set_margin_top(12);
-        loading_box.set_margin_bottom(12);
+        loading_box.set_margin_top(16);
+        loading_box.set_margin_bottom(16);
 
         let spinner = gtk::Spinner::builder()
             .spinning(true)
+            .height_request(24)
             .build();
         loading_box.append(&spinner);
 
@@ -600,33 +652,58 @@ impl TensorPage {
                     if let Some(btn) = toggle_btn_weak.upgrade() {
                         btn.set_sensitive(true);
 
-                        // Set initial button label based on tensor dimensionality
-                        if is_1d {
-                            btn.set_label("Histogram"); // 1D starts in Line Plot, so button goes to Histogram
+                        // Store tensor dimensionality for button click handler
+                        let is_1d_tensor = is_1d;
+
+                        // Set initial button label based on current display mode
+                        // For 1D: Line Plot -> Histogram (no Heatmap option)
+                        // For 2D+: Heatmap <-> Histogram
+                        if is_1d_tensor {
+                            btn.set_label("Show Histogram");
                         } else {
-                            btn.set_label("Histogram"); // 2D+ starts in Heatmap, so button goes to Histogram
+                            btn.set_label("Show Histogram");
                         }
 
                         // Connect click handler to toggle display mode
                         let heatmap_for_toggle = heatmap_weak.clone();
                         btn.connect_clicked(move |button| {
-                            heatmap_for_toggle.toggle_display_mode();
-                            // Update button label based on current mode
-                            let mode_label = heatmap_for_toggle.get_display_mode_label();
-                            match mode_label.as_str() {
-                                "Line Plot" => button.set_label("Histogram"),
-                                "Histogram" => {
-                                    // Determine next mode based on tensor dimensionality
-                                    if heatmap_for_toggle.is_line_plot_mode() {
-                                        // Was in line plot, go to histogram
-                                        button.set_label("Heatmap");
-                                    } else {
-                                        // Was in heatmap or histogram, toggle between them
-                                        button.set_label("Heatmap");
+                            let current_mode = heatmap_for_toggle.get_display_mode_label();
+
+                            // Determine the next mode and button label based on tensor dimensionality
+                            if is_1d_tensor {
+                                // 1D tensors only toggle: Line Plot <-> Histogram
+                                match current_mode.as_str() {
+                                    "Line Plot" => {
+                                        heatmap_for_toggle.toggle_display_mode();
+                                        button.set_label("Show Line Plot");
+                                    }
+                                    "Histogram" => {
+                                        heatmap_for_toggle.toggle_display_mode();
+                                        button.set_label("Show Histogram");
+                                    }
+                                    _ => {
+                                        // Fallback - should not happen for 1D tensors
+                                        heatmap_for_toggle.set_display_mode_line_plot();
+                                        button.set_label("Show Histogram");
                                     }
                                 }
-                                "Heatmap" => button.set_label("Histogram"),
-                                _ => button.set_label("Histogram"),
+                            } else {
+                                // 2D+ tensors toggle: Heatmap <-> Histogram
+                                match current_mode.as_str() {
+                                    "Heatmap" => {
+                                        heatmap_for_toggle.toggle_display_mode();
+                                        button.set_label("Show Heatmap");
+                                    }
+                                    "Histogram" => {
+                                        heatmap_for_toggle.toggle_display_mode();
+                                        button.set_label("Show Histogram");
+                                    }
+                                    _ => {
+                                        // Fallback - set to heatmap
+                                        heatmap_for_toggle.set_display_mode(false);
+                                        button.set_label("Show Histogram");
+                                    }
+                                }
                             }
                         });
                     }

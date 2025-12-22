@@ -28,6 +28,7 @@ pub struct HeatmapWidget {
     drawing_area: DrawingArea,
     data: Rc<RefCell<Option<HeatmapData>>>,
     display_mode: Rc<RefCell<DisplayMode>>,
+    is_1d: Rc<RefCell<bool>>,  // Track if this is a 1D tensor
     tooltip_label: gtk::Label,
     slice_selection: Rc<RefCell<Option<SliceSelection>>>,
     slice_controls: Rc<RefCell<Option<GtkBox>>>,  // Container for slice controls
@@ -72,6 +73,7 @@ impl HeatmapWidget {
 
         let data = Rc::new(RefCell::new(None));
         let display_mode = Rc::new(RefCell::new(DisplayMode::Heatmap));
+        let is_1d = Rc::new(RefCell::new(false));
         let slice_selection = Rc::new(RefCell::new(None));
         let slice_controls = Rc::new(RefCell::new(None));
         let on_slice_change: Rc<RefCell<Option<Box<dyn Fn(SliceSelection)>>>> = Rc::new(RefCell::new(None));
@@ -142,6 +144,7 @@ impl HeatmapWidget {
             drawing_area,
             data,
             display_mode,
+            is_1d,
             tooltip_label,
             slice_selection,
             slice_controls,
@@ -300,6 +303,10 @@ impl HeatmapWidget {
     /// Set the tensor data to visualize
     /// Automatically downsamples intelligently based on display resolution
     pub fn set_data(&self, values: Vec<f32>, original_shape: &[u64]) {
+        // Track if this is a 1D tensor (for toggle behavior)
+        let is_1d_tensor = original_shape.len() == 1;
+        *self.is_1d.borrow_mut() = is_1d_tensor;
+
         // Check if tensor is too large for reasonable visualization
         let total_elements = original_shape.iter().product::<u64>() as usize;
         if total_elements > 50_000_000 { // 50M elements limit
@@ -363,14 +370,29 @@ impl HeatmapWidget {
         self.drawing_area.queue_draw();
     }
 
-    /// Toggle between heatmap/histogram display modes
+    /// Toggle between display modes
+    /// For 1D tensors: Line Plot <-> Histogram (no Heatmap)
+    /// For 2D+ tensors: Heatmap <-> Histogram
     pub fn toggle_display_mode(&self) {
+        let is_1d = *self.is_1d.borrow();
         let mut mode = self.display_mode.borrow_mut();
-        *mode = match *mode {
-            DisplayMode::Heatmap => DisplayMode::Histogram,
-            DisplayMode::Histogram => DisplayMode::Heatmap,
-            DisplayMode::LinePlot => DisplayMode::Histogram,
+
+        *mode = if is_1d {
+            // 1D tensors: only toggle between Line Plot and Histogram
+            match *mode {
+                DisplayMode::LinePlot => DisplayMode::Histogram,
+                DisplayMode::Histogram => DisplayMode::LinePlot,
+                _ => DisplayMode::LinePlot, // Fallback
+            }
+        } else {
+            // 2D+ tensors: toggle between Heatmap and Histogram
+            match *mode {
+                DisplayMode::Heatmap => DisplayMode::Histogram,
+                DisplayMode::Histogram => DisplayMode::Heatmap,
+                _ => DisplayMode::Heatmap, // Fallback
+            }
         };
+
         self.drawing_area.queue_draw();
     }
 
