@@ -1,8 +1,8 @@
+use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use memmap2::Mmap;
 use std::sync::Arc;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in ASCII
@@ -14,8 +14,8 @@ pub struct GGUFFile {
     pub metadata: GGUFMetadata,
     pub tensors: Vec<TensorInfo>,
     pub file_size: u64,
-    mmap: Option<Arc<Mmap>>,  // Memory-mapped file for efficient access
-    file_path: Option<std::path::PathBuf>,  // Store file path for lazy mmap initialization
+    mmap: Option<Arc<Mmap>>, // Memory-mapped file for efficient access
+    file_path: Option<std::path::PathBuf>, // Store file path for lazy mmap initialization
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +69,13 @@ pub enum GGMLType {
     I8 = 16,
     I16 = 17,
     I32 = 18,
+    IQ3_S = 21,
+    IQ2_S = 22,
+    IQ4_XS = 23,
+    I64 = 27,
+    F64 = 28,
+    IQ1_S = 30,
+    IQ1_M = 31,
     MXFP4 = 39,
 }
 
@@ -92,6 +99,13 @@ impl GGMLType {
             16 => Ok(GGMLType::I8),
             17 => Ok(GGMLType::I16),
             18 => Ok(GGMLType::I32),
+            21 => Ok(GGMLType::IQ3_S),
+            22 => Ok(GGMLType::IQ2_S),
+            23 => Ok(GGMLType::IQ4_XS),
+            27 => Ok(GGMLType::I64),
+            28 => Ok(GGMLType::F64),
+            30 => Ok(GGMLType::IQ1_S),
+            31 => Ok(GGMLType::IQ1_M),
             39 => Ok(GGMLType::MXFP4),
             _ => Err(format!("Unknown GGML type: {}", value)),
         }
@@ -101,16 +115,18 @@ impl GGMLType {
         match self {
             GGMLType::F32 | GGMLType::I32 => 32.0,
             GGMLType::F16 | GGMLType::I16 => 16.0,
-            GGMLType::Q4_0 | GGMLType::Q4_1 => 4.5,
+            GGMLType::I64 | GGMLType::F64 => 64.0,
+            GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::IQ4_XS => 4.5,
             GGMLType::Q5_0 | GGMLType::Q5_1 => 5.5,
             GGMLType::Q8_0 | GGMLType::Q8_1 | GGMLType::I8 => 8.5,
-            GGMLType::Q2_K => 2.5625,
-            GGMLType::Q3_K => 3.4375,
+            GGMLType::Q2_K | GGMLType::IQ2_S => 2.5625,
+            GGMLType::Q3_K | GGMLType::IQ3_S => 3.4375,
             GGMLType::Q4_K => 4.5,
             GGMLType::Q5_K => 5.5,
             GGMLType::Q6_K => 6.5625,
             GGMLType::Q8_K => 8.5,
-            GGMLType::MXFP4 => 4.0,  // Microscaling FP4: 4 bits per weight
+            GGMLType::IQ1_S | GGMLType::IQ1_M => 1.75,
+            GGMLType::MXFP4 => 4.0,
         }
     }
 
@@ -133,6 +149,13 @@ impl GGMLType {
             GGMLType::I8 => "I8",
             GGMLType::I16 => "I16",
             GGMLType::I32 => "I32",
+            GGMLType::IQ3_S => "IQ3_S",
+            GGMLType::IQ2_S => "IQ2_S",
+            GGMLType::IQ4_XS => "IQ4_XS",
+            GGMLType::I64 => "I64",
+            GGMLType::F64 => "F64",
+            GGMLType::IQ1_S => "IQ1_S",
+            GGMLType::IQ1_M => "IQ1_M",
             GGMLType::MXFP4 => "MXFP4",
         }
     }
@@ -140,10 +163,10 @@ impl GGMLType {
 
 impl GGUFFile {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let mut file = File::open(path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
-        let file_size = file.metadata()
+        let file_size = file
+            .metadata()
             .map_err(|e| format!("Failed to get file size: {}", e))?
             .len();
 
@@ -192,7 +215,8 @@ impl GGUFFile {
             .unwrap_or(32);
 
         // Calculate tensor data offset
-        let current_pos = file.stream_position()
+        let current_pos = file
+            .stream_position()
             .map_err(|e| format!("Failed to get position: {}", e))?;
         let tensor_data_offset = ((current_pos + alignment - 1) / alignment) * alignment;
 
@@ -208,7 +232,7 @@ impl GGUFFile {
             },
             tensors,
             file_size,
-            mmap: None,  // Will be initialized lazily when needed
+            mmap: None, // Will be initialized lazily when needed
             file_path: Some(path.to_path_buf()),
         })
     }
@@ -216,7 +240,9 @@ impl GGUFFile {
     /// Initialize memory mapping for efficient tensor access
     pub fn init_mmap(&mut self) -> Result<(), String> {
         if self.mmap.is_none() {
-            let path = self.file_path.as_ref()
+            let path = self
+                .file_path
+                .as_ref()
                 .ok_or("File path not available for memory mapping")?;
 
             let file = File::open(path)
@@ -247,13 +273,15 @@ impl GGUFFile {
         &mut self,
         tensor_name: &str,
         max_elements: usize,
-        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>,
     ) -> Result<Vec<f32>, String> {
         // Initialize memory mapping if not already done
         self.init_mmap()?;
 
         // Find the tensor
-        let tensor = self.tensors.iter()
+        let tensor = self
+            .tensors
+            .iter()
             .find(|t| t.name == tensor_name)
             .ok_or(format!("Tensor '{}' not found", tensor_name))?;
 
@@ -281,9 +309,7 @@ impl GGUFFile {
             total_parameters: self.compute_total_parameters(),
             total_memory_bytes: self.compute_memory_requirements(),
             memory_mapping_enabled: self.mmap.is_some(),
-            quantized_tensors: self.tensors.iter()
-                .filter(|t| matches!(t.dtype, GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 | GGMLType::Q2_K | GGMLType::Q3_K | GGMLType::Q4_K | GGMLType::Q5_K | GGMLType::Q6_K | GGMLType::Q8_K))
-                .count(),
+            quantized_tensors: self.tensors.iter().filter(|t| t.is_quantized()).count(),
         }
     }
 }
@@ -301,10 +327,28 @@ impl std::fmt::Display for PerformanceStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Performance Statistics:")?;
         writeln!(f, "  Total Tensors: {}", self.total_tensors)?;
-        writeln!(f, "  Total Parameters: {:.2}B", self.total_parameters as f64 / 1e9)?;
-        writeln!(f, "  Total Memory: {:.2}GB", self.total_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0))?;
-        writeln!(f, "  Memory Mapping: {}", if self.memory_mapping_enabled { "Enabled" } else { "Disabled" })?;
-        writeln!(f, "  Quantized Tensors: {} ({:.1}%)",
+        writeln!(
+            f,
+            "  Total Parameters: {:.2}B",
+            self.total_parameters as f64 / 1e9
+        )?;
+        writeln!(
+            f,
+            "  Total Memory: {:.2}GB",
+            self.total_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        )?;
+        writeln!(
+            f,
+            "  Memory Mapping: {}",
+            if self.memory_mapping_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        )?;
+        writeln!(
+            f,
+            "  Quantized Tensors: {} ({:.1}%)",
             self.quantized_tensors,
             (self.quantized_tensors as f64 / self.total_tensors as f64) * 100.0
         )?;
@@ -314,13 +358,16 @@ impl std::fmt::Display for PerformanceStats {
 
 impl GGUFFile {
     pub fn compute_total_parameters(&self) -> u64 {
-        self.tensors.iter().map(|t| {
-            t.dimensions.iter().product::<u64>()
-        }).sum()
+        self.tensors
+            .iter()
+            .map(|t| t.dimensions.iter().product::<u64>())
+            .sum()
     }
 
     pub fn get_vocab_size(&self) -> Option<usize> {
-        self.metadata.values.get("tokenizer.ggml.tokens")
+        self.metadata
+            .values
+            .get("tokenizer.ggml.tokens")
             .and_then(|v| {
                 if let MetadataValue::Array(tokens) = v {
                     Some(tokens.len())
@@ -347,12 +394,10 @@ impl GGUFMetadata {
     }
 
     pub fn get_u32(&self, key: &str) -> Option<u32> {
-        self.values.get(key).and_then(|v| {
-            match v {
-                MetadataValue::UInt32(n) => Some(*n),
-                MetadataValue::UInt64(n) => Some(*n as u32),
-                _ => None,
-            }
+        self.values.get(key).and_then(|v| match v {
+            MetadataValue::UInt32(n) => Some(*n),
+            MetadataValue::UInt64(n) => Some(*n as u32),
+            _ => None,
         })
     }
 
@@ -409,20 +454,20 @@ mod dequantize {
     /// Get the block size in bytes for a quantization format
     pub fn block_bytes(ggml_type: GGMLType) -> usize {
         match ggml_type {
-            GGMLType::Q4_0 => 9,   // scale (2 bytes) + 8 quants (4 bytes)
-            GGMLType::Q4_1 => 10,  // min (2 bytes) + scale (2 bytes) + 8 quants (4 bytes)
-            GGMLType::Q5_0 => 12,  // scale (2 bytes) + min_h (1 byte) + qs (4 bytes) + qh (4 bytes)
-            GGMLType::Q5_1 => 14,  // min (2 bytes) + scale (2 bytes) + qs (4 bytes) + qh (4 bytes) + dmin (2 bytes)
-            GGMLType::Q8_0 => 34,  // scale (2 bytes) + 32 quants (32 bytes)
-            GGMLType::Q8_1 => 40,  // scale (2 bytes) + scale2 (2 bytes) + 32 quants (32 bytes) + dmin (4 bytes)
-            GGMLType::Q2_K => 6,   // scale (2 bytes) + min (2 bytes) + qs (1 byte) + qh (1 byte)
-            GGMLType::Q3_K => 8,   // scale (2 bytes) + h (1 byte) + qs (3 bytes) + qh (2 bytes)
-            GGMLType::Q4_K => 10,  // scale (2 bytes) + min (2 bytes) + scales (3 bytes) + qs (5 bytes)
-            GGMLType::Q5_K => 12,  // scale (2 bytes) + min (2 bytes) + scales (4 bytes) + qh (2 bytes) + qs (6 bytes)
-            GGMLType::Q6_K => 16,  // scale (2 bytes) + min (2 bytes) + scales (6 bytes) + qh (2 bytes) + q8 (8 bytes)
-            GGMLType::Q8_K => 20,  // scale (2 bytes) + min (2 bytes) + scales (12 bytes) + qs (4 bytes)
-            GGMLType::MXFP4 => 2,  // 4 FP4 values in 2 bytes
-            _ => 4,  // Default to 4 bytes for unquantized types
+            GGMLType::Q4_0 => 9,  // scale (2 bytes) + 8 quants (4 bytes)
+            GGMLType::Q4_1 => 10, // min (2 bytes) + scale (2 bytes) + 8 quants (4 bytes)
+            GGMLType::Q5_0 => 12, // scale (2 bytes) + min_h (1 byte) + qs (4 bytes) + qh (4 bytes)
+            GGMLType::Q5_1 => 14, // min (2 bytes) + scale (2 bytes) + qs (4 bytes) + qh (4 bytes) + dmin (2 bytes)
+            GGMLType::Q8_0 => 34, // scale (2 bytes) + 32 quants (32 bytes)
+            GGMLType::Q8_1 => 40, // scale (2 bytes) + scale2 (2 bytes) + 32 quants (32 bytes) + dmin (4 bytes)
+            GGMLType::Q2_K => 6,  // scale (2 bytes) + min (2 bytes) + qs (1 byte) + qh (1 byte)
+            GGMLType::Q3_K => 8,  // scale (2 bytes) + h (1 byte) + qs (3 bytes) + qh (2 bytes)
+            GGMLType::Q4_K => 10, // scale (2 bytes) + min (2 bytes) + scales (3 bytes) + qs (5 bytes)
+            GGMLType::Q5_K => 12, // scale (2 bytes) + min (2 bytes) + scales (4 bytes) + qh (2 bytes) + qs (6 bytes)
+            GGMLType::Q6_K => 16, // scale (2 bytes) + min (2 bytes) + scales (6 bytes) + qh (2 bytes) + q8 (8 bytes)
+            GGMLType::Q8_K => 20, // scale (2 bytes) + min (2 bytes) + scales (12 bytes) + qs (4 bytes)
+            GGMLType::MXFP4 => 2, // 4 FP4 values in 2 bytes
+            _ => 4,               // Default to 4 bytes for unquantized types
         }
     }
 
@@ -910,10 +955,14 @@ impl TensorInfo {
     }
 
     pub fn shape_string(&self) -> String {
-        format!("[{}]", self.dimensions.iter()
-            .map(|d| d.to_string())
-            .collect::<Vec<_>>()
-            .join(", "))
+        format!(
+            "[{}]",
+            self.dimensions
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     /// Get the number of bytes per element for this tensor's data type
@@ -938,10 +987,26 @@ impl TensorInfo {
 
     /// Check if this tensor uses quantization
     pub fn is_quantized(&self) -> bool {
-        matches!(self.dtype,
-            GGMLType::Q2_K | GGMLType::Q3_K | GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q4_K |
-            GGMLType::Q5_0 | GGMLType::Q5_1 | GGMLType::Q5_K | GGMLType::Q6_K |
-            GGMLType::Q8_0 | GGMLType::Q8_1 | GGMLType::Q8_K | GGMLType::MXFP4
+        matches!(
+            self.dtype,
+            GGMLType::Q2_K
+                | GGMLType::Q3_K
+                | GGMLType::Q4_0
+                | GGMLType::Q4_1
+                | GGMLType::Q4_K
+                | GGMLType::Q5_0
+                | GGMLType::Q5_1
+                | GGMLType::Q5_K
+                | GGMLType::Q6_K
+                | GGMLType::Q8_0
+                | GGMLType::Q8_1
+                | GGMLType::Q8_K
+                | GGMLType::IQ3_S
+                | GGMLType::IQ2_S
+                | GGMLType::IQ4_XS
+                | GGMLType::IQ1_S
+                | GGMLType::IQ1_M
+                | GGMLType::MXFP4
         )
     }
 
@@ -957,7 +1022,7 @@ impl TensorInfo {
         &self,
         mmap: &memmap2::Mmap,
         max_elements: usize,
-        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>,
     ) -> Result<Vec<f32>, String> {
         if self.is_quantized() {
             // For quantized tensors, we need special handling to respect block boundaries
@@ -1081,12 +1146,8 @@ impl TensorInfo {
         match self.dtype {
             GGMLType::Q4_0 => Ok(dequantize::q4_0(tensor_data, total_elements_to_read)),
             GGMLType::Q4_1 => Ok(dequantize::q4_1(tensor_data, total_elements_to_read)),
-            GGMLType::Q5_0 => {
-                self.dequantize_q5_0_simplified(tensor_data, total_elements_to_read)
-            }
-            GGMLType::Q5_1 => {
-                self.dequantize_q5_1_simplified(tensor_data, total_elements_to_read)
-            }
+            GGMLType::Q5_0 => self.dequantize_q5_0_simplified(tensor_data, total_elements_to_read),
+            GGMLType::Q5_1 => self.dequantize_q5_1_simplified(tensor_data, total_elements_to_read),
             GGMLType::Q8_0 => Ok(dequantize::q8_0(tensor_data, total_elements_to_read)),
             GGMLType::Q8_1 => Ok(dequantize::q8_1(tensor_data, total_elements_to_read)),
             GGMLType::Q2_K => Ok(dequantize::q2_k(tensor_data, total_elements_to_read)),
@@ -1227,17 +1288,13 @@ impl TensorInfo {
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect())
             }
-            GGMLType::F16 => {
-                Ok(dequantize::f16_to_f32(tensor_data, samples_to_read))
-            }
-            GGMLType::I8 => {
-                Ok(tensor_data
-                    .iter()
-                    .step_by(stride)
-                    .take(samples_to_read)
-                    .map(|&b| b as i8 as f32)
-                    .collect())
-            }
+            GGMLType::F16 => Ok(dequantize::f16_to_f32(tensor_data, samples_to_read)),
+            GGMLType::I8 => Ok(tensor_data
+                .iter()
+                .step_by(stride)
+                .take(samples_to_read)
+                .map(|&b| b as i8 as f32)
+                .collect()),
             GGMLType::I16 => {
                 let chunks = tensor_data.chunks_exact(2);
                 Ok(chunks
@@ -1251,11 +1308,16 @@ impl TensorInfo {
                 Ok(chunks
                     .step_by(stride)
                     .take(samples_to_read)
-                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+                    .map(|chunk| {
+                        i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32
+                    })
                     .collect())
             }
             // These should not reach here for non-quantized tensors
-            _ => Err(format!("Unsupported data type for non-quantized reading: {:?}", self.dtype)),
+            _ => Err(format!(
+                "Unsupported data type for non-quantized reading: {:?}",
+                self.dtype
+            )),
         }
     }
 
@@ -1312,13 +1374,14 @@ impl TensorInfo {
             }
 
             // Calculate the contiguous range for this row
-            let row_start_offset = slice.linear_offset(row, 0)
-                .ok_or("Invalid slice offset")?;
-            let row_end_offset = slice.linear_offset(row, slice_width - 1)
+            let row_start_offset = slice.linear_offset(row, 0).ok_or("Invalid slice offset")?;
+            let row_end_offset = slice
+                .linear_offset(row, slice_width - 1)
                 .ok_or("Invalid slice offset")?;
 
             let start_byte = (self.offset + row_start_offset * bytes_per_element) as usize;
-            let end_byte = (self.offset + row_end_offset * bytes_per_element + bytes_per_element) as usize;
+            let end_byte =
+                (self.offset + row_end_offset * bytes_per_element + bytes_per_element) as usize;
 
             // Ensure we're within bounds
             if end_byte > mmap.len() {
@@ -1329,7 +1392,11 @@ impl TensorInfo {
             let row_data = &mmap[start_byte..end_byte];
 
             // Parse row data based on type
-            let row_values = self.parse_tensor_bytes(row_data, slice_width as usize, samples_to_read - samples_read)?;
+            let row_values = self.parse_tensor_bytes(
+                row_data,
+                slice_width as usize,
+                samples_to_read - samples_read,
+            )?;
             result.extend_from_slice(&row_values);
             samples_read += row_values.len();
         }
@@ -1363,7 +1430,8 @@ impl TensorInfo {
                 }
 
                 // Get the linear offset in the full tensor
-                let offset = slice.linear_offset(row, col)
+                let offset = slice
+                    .linear_offset(row, col)
                     .ok_or("Invalid slice offset")?;
 
                 // Calculate byte position
@@ -1391,7 +1459,12 @@ impl TensorInfo {
     }
 
     /// Parse tensor bytes based on data type with improved error handling
-    fn parse_tensor_bytes(&self, data: &[u8], max_values: usize, limit: usize) -> Result<Vec<f32>, String> {
+    fn parse_tensor_bytes(
+        &self,
+        data: &[u8],
+        max_values: usize,
+        limit: usize,
+    ) -> Result<Vec<f32>, String> {
         let values_to_parse = max_values.min(limit);
 
         // Validate data length
@@ -1417,7 +1490,11 @@ impl TensorInfo {
             GGMLType::F32 => {
                 let bytes_needed = values_to_parse * 4;
                 if data.len() < bytes_needed {
-                    return Err(format!("Insufficient F32 data: need {} bytes, got {}", bytes_needed, data.len()));
+                    return Err(format!(
+                        "Insufficient F32 data: need {} bytes, got {}",
+                        bytes_needed,
+                        data.len()
+                    ));
                 }
                 let chunks = data.chunks_exact(4);
                 Ok(chunks
@@ -1428,15 +1505,24 @@ impl TensorInfo {
             GGMLType::F16 => {
                 let bytes_needed = values_to_parse * 2;
                 if data.len() < bytes_needed {
-                    return Err(format!("Insufficient F16 data: need {} bytes, got {}", bytes_needed, data.len()));
+                    return Err(format!(
+                        "Insufficient F16 data: need {} bytes, got {}",
+                        bytes_needed,
+                        data.len()
+                    ));
                 }
                 Ok(dequantize::f16_to_f32(data, values_to_parse))
             }
             GGMLType::I8 => {
                 if data.len() < values_to_parse {
-                    return Err(format!("Insufficient I8 data: need {} bytes, got {}", values_to_parse, data.len()));
+                    return Err(format!(
+                        "Insufficient I8 data: need {} bytes, got {}",
+                        values_to_parse,
+                        data.len()
+                    ));
                 }
-                Ok(data.iter()
+                Ok(data
+                    .iter()
                     .take(values_to_parse)
                     .map(|&b| b as i8 as f32)
                     .collect())
@@ -1444,7 +1530,11 @@ impl TensorInfo {
             GGMLType::I16 => {
                 let bytes_needed = values_to_parse * 2;
                 if data.len() < bytes_needed {
-                    return Err(format!("Insufficient I16 data: need {} bytes, got {}", bytes_needed, data.len()));
+                    return Err(format!(
+                        "Insufficient I16 data: need {} bytes, got {}",
+                        bytes_needed,
+                        data.len()
+                    ));
                 }
                 let chunks = data.chunks_exact(2);
                 Ok(chunks
@@ -1455,12 +1545,18 @@ impl TensorInfo {
             GGMLType::I32 => {
                 let bytes_needed = values_to_parse * 4;
                 if data.len() < bytes_needed {
-                    return Err(format!("Insufficient I32 data: need {} bytes, got {}", bytes_needed, data.len()));
+                    return Err(format!(
+                        "Insufficient I32 data: need {} bytes, got {}",
+                        bytes_needed,
+                        data.len()
+                    ));
                 }
                 let chunks = data.chunks_exact(4);
                 Ok(chunks
                     .take(values_to_parse)
-                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+                    .map(|chunk| {
+                        i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32
+                    })
                     .collect())
             }
             // Quantized types - use proper dequantization
@@ -1483,9 +1579,7 @@ impl TensorInfo {
                 // Use simplified implementation
                 self.dequantize_q5_1_simplified(data, values_to_parse)
             }
-            _ => {
-                Err(format!("Unsupported data type: {:?}", self.dtype))
-            }
+            _ => Err(format!("Unsupported data type: {:?}", self.dtype)),
         }
     }
 
@@ -1547,13 +1641,15 @@ impl TensorInfo {
             GGMLType::F16 => read_f16(reader),
             GGMLType::I8 => {
                 let mut buf = [0u8; 1];
-                reader.read_exact(&mut buf)
+                reader
+                    .read_exact(&mut buf)
                     .map_err(|e| format!("Read failed: {}", e))?;
                 Ok(buf[0] as i8 as f32)
             }
             GGMLType::I16 => {
                 let mut buf = [0u8; 2];
-                reader.read_exact(&mut buf)
+                reader
+                    .read_exact(&mut buf)
                     .map_err(|e| format!("Read failed: {}", e))?;
                 Ok(i16::from_le_bytes(buf) as f32)
             }
@@ -1564,7 +1660,8 @@ impl TensorInfo {
             // For quantized types, read raw byte and normalize
             _ => {
                 let mut buf = [0u8; 1];
-                reader.read_exact(&mut buf)
+                reader
+                    .read_exact(&mut buf)
                     .map_err(|e| format!("Read failed: {}", e))?;
                 Ok((buf[0] as f32 - 128.0) / 128.0)
             }
@@ -1579,13 +1676,12 @@ impl TensorInfo {
         &self,
         file_path: &Path,
         max_elements: usize,
-        slice_selection: Option<&crate::tensor_slice::SliceSelection>
+        slice_selection: Option<&crate::tensor_slice::SliceSelection>,
     ) -> Result<Vec<f32>, String> {
         use std::fs::File;
         use std::io::{Seek, SeekFrom};
 
-        let mut file = File::open(file_path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut file = File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
 
         // If we have a slice selection, use the optimized path
         if let Some(slice) = slice_selection {
@@ -1638,8 +1734,7 @@ impl TensorInfo {
                 }
 
                 // Calculate the contiguous range of elements for this row
-                let row_start_offset = slice.linear_offset(row, 0)
-                    .ok_or("Invalid slice offset")?;
+                let row_start_offset = slice.linear_offset(row, 0).ok_or("Invalid slice offset")?;
                 let row_size_bytes = (slice_width * bytes_per_element) as usize;
 
                 // Seek to the start of the row
@@ -1680,7 +1775,8 @@ impl TensorInfo {
                     }
 
                     // Get the linear offset in the full tensor
-                    let offset = slice.linear_offset(row, col)
+                    let offset = slice
+                        .linear_offset(row, col)
                         .ok_or("Invalid slice offset")?;
 
                     // Seek to this element
@@ -1786,7 +1882,8 @@ impl TensorInfo {
             }
             // For quantized types, read raw bytes and normalize to -1..1 range
             _ => {
-                let bytes_per_element = (self.size_bytes as f64 / element_count as f64).ceil() as usize;
+                let bytes_per_element =
+                    (self.size_bytes as f64 / element_count as f64).ceil() as usize;
                 for i in 0..samples_to_read {
                     let offset_in_tensor = (i * stride) as u64 * bytes_per_element as u64;
                     file.seek(SeekFrom::Start(self.offset + offset_in_tensor))
@@ -1807,7 +1904,11 @@ impl TensorInfo {
     /// Read tensor data from file, with optional quantization
     /// Returns a downsampled vector of f32 values
     /// This is the original method, maintained for backward compatibility
-    pub fn read_tensor_data(&self, file_path: &Path, max_elements: usize) -> Result<Vec<f32>, String> {
+    pub fn read_tensor_data(
+        &self,
+        file_path: &Path,
+        max_elements: usize,
+    ) -> Result<Vec<f32>, String> {
         self.read_tensor_data_with_slice(file_path, max_elements, None)
     }
 }
@@ -1815,35 +1916,40 @@ impl TensorInfo {
 // Helper functions for reading binary data
 fn read_u32<R: Read>(reader: &mut R) -> Result<u32, String> {
     let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read u32: {}", e))?;
     Ok(u32::from_le_bytes(buf))
 }
 
 fn read_u64<R: Read>(reader: &mut R) -> Result<u64, String> {
     let mut buf = [0u8; 8];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read u64: {}", e))?;
     Ok(u64::from_le_bytes(buf))
 }
 
 fn read_i32<R: Read>(reader: &mut R) -> Result<i32, String> {
     let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read i32: {}", e))?;
     Ok(i32::from_le_bytes(buf))
 }
 
 fn read_f32<R: Read>(reader: &mut R) -> Result<f32, String> {
     let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read f32: {}", e))?;
     Ok(f32::from_le_bytes(buf))
 }
 
 fn read_f16<R: Read>(reader: &mut R) -> Result<f32, String> {
     let mut buf = [0u8; 2];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read f16: {}", e))?;
     let bits = u16::from_le_bytes(buf);
 
@@ -1879,10 +1985,10 @@ fn read_f16<R: Read>(reader: &mut R) -> Result<f32, String> {
 fn read_string<R: Read>(reader: &mut R) -> Result<String, String> {
     let len = read_u64(reader)?;
     let mut buf = vec![0u8; len as usize];
-    reader.read_exact(&mut buf)
+    reader
+        .read_exact(&mut buf)
         .map_err(|e| format!("Failed to read string: {}", e))?;
-    String::from_utf8(buf)
-        .map_err(|e| format!("Invalid UTF-8 string: {}", e))
+    String::from_utf8(buf).map_err(|e| format!("Invalid UTF-8 string: {}", e))
 }
 
 fn read_metadata_kv<R: Read>(reader: &mut R) -> Result<(String, MetadataValue), String> {
@@ -1916,18 +2022,18 @@ fn read_metadata_kv<R: Read>(reader: &mut R) -> Result<(String, MetadataValue), 
                 arr.push(elem);
             }
             MetadataValue::Array(arr)
-        },
+        }
         10 => MetadataValue::UInt64(read_u64(reader)?),
         11 => {
             let mut buf = [0u8; 8];
             reader.read_exact(&mut buf).unwrap();
             MetadataValue::Int64(i64::from_le_bytes(buf))
-        },
+        }
         12 => {
             let mut buf = [0u8; 8];
             reader.read_exact(&mut buf).unwrap();
             MetadataValue::Float64(f64::from_le_bytes(buf))
-        },
+        }
         _ => return Err(format!("Unknown metadata type: {}", value_type)),
     };
 
