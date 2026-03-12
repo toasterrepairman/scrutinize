@@ -1,13 +1,13 @@
-use gtk::prelude::*;
-use gtk::{ScrolledWindow, Box as GtkBox, Orientation};
 use adw::prelude::*;
-use std::path::Path;
+use gtk::prelude::*;
+use gtk::{Box as GtkBox, Orientation, ScrolledWindow};
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::gguf_parser::GGUFFile;
-use crate::tokenizer::TokenizerPage;
 use crate::tensor_viewer::TensorPage;
+use crate::tokenizer::TokenizerPage;
 
 #[derive(Clone)]
 pub struct GGUFWindow {
@@ -68,9 +68,24 @@ impl GGUFWindow {
         let tensor_page = TensorPage::new();
 
         // Add pages to view stack
-        view_stack.add_titled(&overview_page, Some("overview"), "Overview");
-        view_stack.add_titled(tokenizer_page.widget(), Some("tokenizer"), "Tokenizer");
-        view_stack.add_titled(tensor_page.widget(), Some("tensors"), "Tensors");
+        view_stack.add_titled_with_icon(
+            &overview_page,
+            Some("overview"),
+            "Overview",
+            "text-x-generic-symbolic",
+        );
+        view_stack.add_titled_with_icon(
+            tokenizer_page.widget(),
+            Some("tokenizer"),
+            "Tokenizer",
+            "view-grid-symbolic",
+        );
+        view_stack.add_titled_with_icon(
+            tensor_page.widget(),
+            Some("tensors"),
+            "Tensors",
+            "format-justify-fill-symbolic",
+        );
 
         // Create view switcher bar
         let view_switcher_bar = adw::ViewSwitcherBar::builder()
@@ -144,13 +159,17 @@ impl GGUFWindow {
         dialog.set_filters(Some(&filters));
 
         let window_weak = self.clone();
-        dialog.open(Some(&self.window), None::<&gio::Cancellable>, move |result| {
-            if let Ok(file) = result {
-                if let Some(path) = file.path() {
-                    window_weak.load_file(&path);
+        dialog.open(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        window_weak.load_file(&path);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     pub fn load_file(&self, path: &Path) {
@@ -180,10 +199,12 @@ impl GGUFWindow {
                 *self.gguf_data.borrow_mut() = Some(gguf_file.clone());
 
                 // Update window title
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("GGUF File");
-                self.window.set_title(Some(&format!("{} - Scrutinize", filename)));
+                self.window
+                    .set_title(Some(&format!("{} - Scrutinize", filename)));
 
                 // Build overview page
                 self.build_overview_page(&gguf_file);
@@ -275,7 +296,10 @@ impl GGUFWindow {
                 .build();
 
             // Context length
-            if let Some(ctx_len) = gguf_file.metadata.get_u32(&format!("{}.context_length", arch)) {
+            if let Some(ctx_len) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.context_length", arch))
+            {
                 let ctx_row = adw::ActionRow::builder()
                     .title("Context Length")
                     .subtitle(&format!("{} tokens", ctx_len))
@@ -284,7 +308,10 @@ impl GGUFWindow {
             }
 
             // Embedding length
-            if let Some(emb_len) = gguf_file.metadata.get_u32(&format!("{}.embedding_length", arch)) {
+            if let Some(emb_len) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.embedding_length", arch))
+            {
                 let emb_row = adw::ActionRow::builder()
                     .title("Embedding Dimension")
                     .subtitle(&format!("{}", emb_len))
@@ -302,7 +329,10 @@ impl GGUFWindow {
             }
 
             // Attention heads
-            if let Some(heads) = gguf_file.metadata.get_u32(&format!("{}.attention.head_count", arch)) {
+            if let Some(heads) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.attention.head_count", arch))
+            {
                 let heads_row = adw::ActionRow::builder()
                     .title("Attention Heads")
                     .subtitle(&format!("{}", heads))
@@ -311,7 +341,10 @@ impl GGUFWindow {
             }
 
             // KV heads (for GQA)
-            if let Some(kv_heads) = gguf_file.metadata.get_u32(&format!("{}.attention.head_count_kv", arch)) {
+            if let Some(kv_heads) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.attention.head_count_kv", arch))
+            {
                 let kv_row = adw::ActionRow::builder()
                     .title("KV Cache Heads")
                     .subtitle(&format!("{}", kv_heads))
@@ -320,7 +353,10 @@ impl GGUFWindow {
             }
 
             // Feed forward length
-            if let Some(ff_len) = gguf_file.metadata.get_u32(&format!("{}.feed_forward_length", arch)) {
+            if let Some(ff_len) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.feed_forward_length", arch))
+            {
                 let ff_row = adw::ActionRow::builder()
                     .title("FFN Intermediate Size")
                     .subtitle(&format!("{}", ff_len))
@@ -329,7 +365,10 @@ impl GGUFWindow {
             }
 
             // RoPE dimension
-            if let Some(rope_dim) = gguf_file.metadata.get_u32(&format!("{}.rope.dimension_count", arch)) {
+            if let Some(rope_dim) = gguf_file
+                .metadata
+                .get_u32(&format!("{}.rope.dimension_count", arch))
+            {
                 let rope_row = adw::ActionRow::builder()
                     .title("RoPE Dimensions")
                     .subtitle(&format!("{}", rope_dim))
@@ -338,7 +377,10 @@ impl GGUFWindow {
             }
 
             // RoPE frequency base
-            if let Some(rope_freq) = gguf_file.metadata.get_f32(&format!("{}.rope.freq_base", arch)) {
+            if let Some(rope_freq) = gguf_file
+                .metadata
+                .get_f32(&format!("{}.rope.freq_base", arch))
+            {
                 let freq_row = adw::ActionRow::builder()
                     .title("RoPE Frequency Base")
                     .subtitle(&format!("{:.1}", rope_freq))
@@ -402,8 +444,12 @@ impl GGUFWindow {
 
     fn build_moe_widget_if_applicable(&self, content: &GtkBox, gguf_file: &GGUFFile, arch: &str) {
         // Check if this is an MoE model by looking for expert_count metadata
-        let expert_count = gguf_file.metadata.get_u32(&format!("{}.expert_count", arch));
-        let expert_used_count = gguf_file.metadata.get_u32(&format!("{}.expert_used_count", arch));
+        let expert_count = gguf_file
+            .metadata
+            .get_u32(&format!("{}.expert_count", arch));
+        let expert_used_count = gguf_file
+            .metadata
+            .get_u32(&format!("{}.expert_used_count", arch));
 
         if let Some(total_experts) = expert_count {
             // Validate that we have a reasonable expert count
@@ -472,7 +518,10 @@ impl GGUFWindow {
             progress.set_hexpand(true);
             progress_bar_container.append(&progress);
 
-            let ratio_label = gtk::Label::new(Some(&format!("{}/{} experts active", active_experts, total_experts)));
+            let ratio_label = gtk::Label::new(Some(&format!(
+                "{}/{} experts active",
+                active_experts, total_experts
+            )));
             ratio_label.add_css_class("caption");
             ratio_label.add_css_class("dim-label");
             ratio_label.set_halign(gtk::Align::Center);
@@ -489,11 +538,8 @@ impl GGUFWindow {
 
                 // Calculate estimated active size
                 let file_size = gguf_file.file_size;
-                let estimated_active_size = calculate_active_expert_size(
-                    file_size,
-                    total_experts,
-                    active_experts,
-                );
+                let estimated_active_size =
+                    calculate_active_expert_size(file_size, total_experts, active_experts);
 
                 let size_row = GtkBox::new(Orientation::Horizontal, 8);
                 size_row.set_halign(gtk::Align::Center);
