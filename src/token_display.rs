@@ -28,6 +28,8 @@ impl TokenDisplay {
             .margin_start(12)
             .margin_end(12)
             .max_children_per_line(30)
+            .valign(gtk::Align::Start)
+            .vexpand(false)
             .build();
 
         let scrolled = ScrolledWindow::builder()
@@ -35,7 +37,6 @@ impl TokenDisplay {
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&flow_box)
             .vexpand(true)
-            .min_content_height(120)
             .build();
 
         Self {
@@ -80,9 +81,11 @@ impl TokenDisplay {
         // Show a message if tokens were truncated
         if total_tokens > MAX_DISPLAY_TOKENS {
             let truncate_msg = gtk::Label::builder()
-                .label(&format!("... and {} more tokens (showing first {})",
+                .label(&format!(
+                    "... and {} more tokens (showing first {})",
                     total_tokens - MAX_DISPLAY_TOKENS,
-                    MAX_DISPLAY_TOKENS))
+                    MAX_DISPLAY_TOKENS
+                ))
                 .css_classes(vec!["dim-label".to_string(), "caption".to_string()])
                 .margin_top(12)
                 .margin_bottom(12)
@@ -99,6 +102,9 @@ impl TokenDisplay {
         token_box.set_margin_bottom(2);
         token_box.set_margin_start(2);
         token_box.set_margin_end(2);
+        token_box.set_valign(gtk::Align::Start);
+        token_box.set_vexpand(false);
+        token_box.set_size_request(100, 60);
 
         // Token content with colored background based on type
         let content_box = GtkBox::new(Orientation::Horizontal, 6);
@@ -106,12 +112,14 @@ impl TokenDisplay {
         content_box.set_margin_bottom(6);
         content_box.set_margin_start(8);
         content_box.set_margin_end(8);
+        content_box.set_valign(gtk::Align::Start);
+        content_box.set_vexpand(false);
 
         // Token text with escaping
         let escaped_token = escape_token(&token_info.token);
         let token_label = gtk::Label::builder()
             .label(&format!("\"{}\"", escaped_token))
-            .use_markup(false)  // Explicitly disable markup to avoid parsing issues
+            .use_markup(false) // Explicitly disable markup to avoid parsing issues
             .selectable(true)
             .css_classes(vec!["monospace".to_string()])
             .wrap(true)
@@ -121,13 +129,13 @@ impl TokenDisplay {
 
         // Apply color based on token type
         match token_info.token_type {
-            0 => token_box.add_css_class("token-normal"),      // Normal tokens
-            1 => token_box.add_css_class("token-unknown"),     // Unknown
-            2 => token_box.add_css_class("token-control"),     // Control
-            3 => token_box.add_css_class("token-user"),        // User defined
-            4 => token_box.add_css_class("token-unused"),      // Unused
-            5 => token_box.add_css_class("token-byte"),        // Byte
-            _ => token_box.add_css_class("token-other"),       // Other
+            0 => token_box.add_css_class("token-normal"), // Normal tokens
+            1 => token_box.add_css_class("token-unknown"), // Unknown
+            2 => token_box.add_css_class("token-control"), // Control
+            3 => token_box.add_css_class("token-user"),   // User defined
+            4 => token_box.add_css_class("token-unused"), // Unused
+            5 => token_box.add_css_class("token-byte"),   // Byte
+            _ => token_box.add_css_class("token-other"),  // Other
         }
 
         content_box.append(&token_label);
@@ -139,6 +147,8 @@ impl TokenDisplay {
         meta_box.set_margin_end(8);
         meta_box.set_margin_bottom(6);
         meta_box.set_halign(gtk::Align::Center);
+        meta_box.set_valign(gtk::Align::Start);
+        meta_box.set_vexpand(false);
 
         let index_label = gtk::Label::builder()
             .label(&format!("[{}]", token_info.index))
@@ -147,7 +157,11 @@ impl TokenDisplay {
 
         let id_label = gtk::Label::builder()
             .label(&format!("ID:{}", token_info.id))
-            .css_classes(vec!["dim-label".to_string(), "caption".to_string(), "numeric".to_string()])
+            .css_classes(vec![
+                "dim-label".to_string(),
+                "caption".to_string(),
+                "numeric".to_string(),
+            ])
             .build();
 
         meta_box.append(&index_label);
@@ -205,7 +219,10 @@ impl TokenDisplay {
         let token_group = GtkBox::new(Orientation::Vertical, 6);
 
         let token_label = gtk::Label::builder()
-            .label(&format!("<tt>\"{}\"</tt>", glib::markup_escape_text(&escaped)))
+            .label(&format!(
+                "<tt>\"{}\"</tt>",
+                glib::markup_escape_text(&escaped)
+            ))
             .use_markup(true)
             .selectable(true)
             .wrap(true)
@@ -215,11 +232,16 @@ impl TokenDisplay {
         token_group.append(&token_label);
 
         // Byte representation
-        let bytes: Vec<String> = token_info.token.bytes()
+        let bytes: Vec<String> = token_info
+            .token
+            .bytes()
             .map(|b| format!("{:02X}", b))
             .collect();
         let bytes_label = gtk::Label::builder()
-            .label(&format!("<small>Bytes: {}</small>", glib::markup_escape_text(&bytes.join(" "))))
+            .label(&format!(
+                "<small>Bytes: {}</small>",
+                glib::markup_escape_text(&bytes.join(" "))
+            ))
             .use_markup(true)
             .css_classes(vec!["dim-label".to_string()])
             .halign(gtk::Align::Start)
@@ -241,7 +263,10 @@ impl TokenDisplay {
             ("Token ID:", format!("{}", token_info.id)),
             ("Index:", format!("{}", token_info.index)),
             ("Score:", format!("{:.6}", token_info.score)),
-            ("Type:", format_token_type(token_info.token_type).to_string()),
+            (
+                "Type:",
+                format_token_type(token_info.token_type).to_string(),
+            ),
             ("Length:", format!("{} bytes", token_info.token.len())),
         ];
 
@@ -280,11 +305,18 @@ impl TokenDisplay {
                 let ch = token_info.token.chars().next().unwrap();
                 format!("Single character: U+{:04X}", ch as u32)
             } else {
-                format!("{} characters, {} UTF-8 bytes", char_count, token_info.token.len())
+                format!(
+                    "{} characters, {} UTF-8 bytes",
+                    char_count,
+                    token_info.token.len()
+                )
             };
 
             let char_label = gtk::Label::builder()
-                .label(&format!("<small>{}</small>", glib::markup_escape_text(&char_info)))
+                .label(&format!(
+                    "<small>{}</small>",
+                    glib::markup_escape_text(&char_info)
+                ))
                 .use_markup(true)
                 .css_classes(vec!["dim-label".to_string()])
                 .halign(gtk::Align::Start)
@@ -312,7 +344,7 @@ fn escape_token(token: &str) -> String {
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
             '\0' => result.push_str("\\0"),
-            ' ' => result.push_str("␣"),  // Visible space character
+            ' ' => result.push_str("␣"), // Visible space character
             c if c.is_control() => result.push_str(&format!("\\u{{{:04x}}}", c as u32)),
             c => result.push(c),
         }
