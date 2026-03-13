@@ -67,7 +67,24 @@ impl TokenizerPage {
         tester_content.set_margin_end(18);
 
         // Input section with proper card styling
-        let input_group = adw::PreferencesGroup::builder().title("Input").build();
+        let input_group = adw::PreferencesGroup::builder().build();
+
+        // Add header row with label and refresh button
+        let input_header = GtkBox::new(Orientation::Horizontal, 6);
+        input_header.set_margin_bottom(6);
+
+        let input_label = gtk::Label::new(Some("Input"));
+        input_label.add_css_class("title-4");
+
+        let refresh_button = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text("Force tokenization")
+            .build();
+        refresh_button.add_css_class("flat");
+
+        input_header.append(&input_label);
+        input_header.append(&gtk::Label::new(None)); // spacer
+        input_header.append(&refresh_button);
 
         let test_input = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -90,6 +107,7 @@ impl TokenizerPage {
             .build();
         input_scrolled.add_css_class("card");
 
+        input_group.add(&input_header);
         input_group.add(&input_scrolled);
         tester_content.append(&input_group);
 
@@ -414,6 +432,47 @@ impl TokenizerPage {
         });
         test_input.add_controller(focus_controller);
 
+        // Connect refresh button - force tokenization without debouncing
+        let token_store_weak2 = Rc::downgrade(&token_store);
+        let tokenizer_trie_weak2 = Rc::downgrade(&tokenizer_trie);
+        let token_display_weak2 = token_display.clone();
+        let summary_label_weak2 = summary_label.clone();
+        let input_buffer_weak2 = input_buffer.downgrade();
+
+        refresh_button.connect_clicked(move |_| {
+            let store = token_store_weak2.upgrade();
+            let trie = tokenizer_trie_weak2.upgrade();
+            let display = token_display_weak2.clone();
+            let label = summary_label_weak2.clone();
+            let buffer = input_buffer_weak2.upgrade();
+
+            if let (Some(store), Some(trie), Some(buffer)) = (store, trie, buffer) {
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+
+                // Use optimized trie-based tokenization
+                let (token_infos, char_count) =
+                    tokenize_to_display_optimized(&text, &store.borrow(), &trie.borrow());
+
+                // Update summary label
+                if !token_infos.is_empty() {
+                    let ratio = char_count as f64 / token_infos.len() as f64;
+                    label.set_text(&format!(
+                        "{} tokens • {} characters • {:.2} chars/token",
+                        token_infos.len(),
+                        char_count,
+                        ratio
+                    ));
+                } else if !text.is_empty() && text != "Enter text to tokenize..." {
+                    label.set_text("⚠ No tokens matched (using simplified tokenizer)");
+                } else {
+                    label.set_text("");
+                }
+
+                // Update token display
+                display.set_tokens(token_infos);
+            }
+        });
+
         page
     }
 
@@ -556,9 +615,14 @@ fn tokenize_to_display_optimized(
 
     let char_count = text.len();
 
-    // Use optimized trie tokenization with limit for UI display
+    // Use fallback tokenization to handle partial/unknown text
     const MAX_DISPLAY_TOKENS: usize = 500;
-    let (token_results, _truncated) = trie.tokenize_limited(text, MAX_DISPLAY_TOKENS);
+    let mut token_results = trie.tokenize_with_fallback(text);
+
+    // Limit to max display tokens
+    if token_results.len() > MAX_DISPLAY_TOKENS {
+        token_results.truncate(MAX_DISPLAY_TOKENS);
+    }
 
     // Convert to TokenInfo for display
     let mut token_infos = Vec::new();

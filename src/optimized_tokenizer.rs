@@ -139,6 +139,73 @@ impl TokenizerTrie {
         (tokens, truncated)
     }
 
+    /// Tokenize with fallback to partial matches - tries shorter matches when exact match fails.
+    /// This ensures even partial/unknown text gets tokenized as much as possible.
+    pub fn tokenize_with_fallback(&self, text: &str) -> Vec<(usize, usize, f32, u32)> {
+        let bytes = text.as_bytes();
+        let mut tokens = Vec::new();
+        let mut pos = 0;
+
+        while pos < bytes.len() {
+            // First try longest match
+            if let Some((id, len, score, token_type)) = self.find_longest_match(bytes, pos) {
+                tokens.push((id, len, score, token_type));
+                pos += len;
+                continue;
+            }
+
+            // No exact match - try progressively shorter prefixes
+            let mut found_partial = false;
+            for try_len in (1..self.max_token_len.min(bytes.len() - pos)).rev() {
+                if let Some((id, score, token_type)) = self.find_partial_match(bytes, pos, try_len)
+                {
+                    tokens.push((id, try_len, score, token_type));
+                    pos += try_len;
+                    found_partial = true;
+                    break;
+                }
+            }
+
+            if !found_partial {
+                // Last resort: emit the single byte as unknown
+                tokens.push((usize::MAX, 1, 0.0, 1)); // usize::MAX marks unknown
+                pos += 1;
+            }
+        }
+
+        tokens
+    }
+
+    /// Find any match starting at position, returning up to max_len characters
+    #[inline]
+    fn find_partial_match(
+        &self,
+        text: &[u8],
+        start: usize,
+        max_len: usize,
+    ) -> Option<(usize, f32, u32)> {
+        let mut node = &self.root;
+        let mut last_match: Option<(usize, f32, u32)> = None;
+
+        let max_search = max_len.min(text.len() - start);
+
+        for i in 0..max_search {
+            let byte = text[start + i];
+
+            if let Some(child) = node.children.get(&byte) {
+                node = child;
+
+                if let (Some(id), Some(metadata)) = (node.token_id, &node.token_data) {
+                    last_match = Some((id, metadata.score, metadata.token_type));
+                }
+            } else {
+                break;
+            }
+        }
+
+        last_match
+    }
+
     /// Get memory usage statistics for the trie
     pub fn memory_stats(&self) -> TrieStats {
         let mut stats = TrieStats::default();
