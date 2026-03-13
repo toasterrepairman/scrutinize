@@ -227,13 +227,35 @@ impl TokenizerPage {
             let escaped_token = escape_token(&token_data.token);
             row.set_title(&format!("\"{}\"", escaped_token));
 
-            // Show score and type as subtitle with better formatting
+            // Show ID and type as subtitle
             let subtitle = format!(
-                "score: {:.4}  •  type: {}",
-                token_data.score,
+                "ID: {}  •  type: {}",
+                token_data.id,
                 format_token_type(token_data.token_type)
             );
             row.set_subtitle(&subtitle);
+
+            // Add click handler for popover - we need to create a TokenInfo
+            let token_id = token_data.id;
+            let token_str = token_data.token.clone();
+            let token_score = token_data.score;
+            let token_type = token_data.token_type;
+
+            let gesture = gtk::GestureClick::new();
+            gesture.connect_released(move |gesture, _, _, _| {
+                if let Some(widget) = gesture.widget() {
+                    let token_info = TokenInfo {
+                        index: 0, // Not used for display
+                        id: token_id,
+                        token: token_str.clone(),
+                        score: token_score,
+                        token_type,
+                    };
+                    TokenDisplay::show_token_popover(&widget, &token_info);
+                }
+            });
+            row.add_controller(gesture);
+            row.set_cursor(gtk::gdk::Cursor::from_name("pointer", None).as_ref());
         });
 
         let list_view = gtk::ListView::new(Some(selection_model.clone()), Some(factory));

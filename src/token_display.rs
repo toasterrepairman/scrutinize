@@ -195,7 +195,7 @@ impl TokenDisplay {
         token_box.upcast()
     }
 
-    fn show_token_popover(parent: &gtk::Widget, token_info: &TokenInfo) {
+    pub fn show_token_popover(parent: &gtk::Widget, token_info: &TokenInfo) {
         let popover = gtk::Popover::new();
         popover.set_parent(parent);
         popover.set_position(gtk::PositionType::Bottom);
@@ -336,7 +336,7 @@ impl TokenDisplay {
     }
 }
 
-fn escape_token(token: &str) -> String {
+pub fn escape_token(token: &str) -> String {
     let mut result = String::new();
     for ch in token.chars() {
         match ch {
@@ -352,7 +352,7 @@ fn escape_token(token: &str) -> String {
     result
 }
 
-fn format_token_type(token_type: u32) -> &'static str {
+pub fn format_token_type(token_type: u32) -> &'static str {
     match token_type {
         0 => "normal",
         1 => "unknown",
