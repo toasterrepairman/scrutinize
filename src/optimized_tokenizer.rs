@@ -45,7 +45,8 @@ impl TokenizerTrie {
         let mut node = &mut self.root;
 
         for &byte in token_bytes {
-            node = node.children
+            node = node
+                .children
                 .entry(byte)
                 .or_insert_with(|| Box::new(TrieNode::default()));
         }
@@ -57,7 +58,11 @@ impl TokenizerTrie {
     /// Find the longest matching token starting at the given position in the text.
     /// Returns (token_id, token_length, score, token_type) or None if no match.
     #[inline]
-    pub fn find_longest_match(&self, text: &[u8], start: usize) -> Option<(usize, usize, f32, u32)> {
+    pub fn find_longest_match(
+        &self,
+        text: &[u8],
+        start: usize,
+    ) -> Option<(usize, usize, f32, u32)> {
         let mut node = &self.root;
         let mut last_match: Option<(usize, usize, f32, u32)> = None;
         let mut current_len = 0;
@@ -107,7 +112,11 @@ impl TokenizerTrie {
 
     /// Optimized tokenization with early termination for UI display.
     /// Stops after max_tokens to avoid processing unnecessarily long inputs.
-    pub fn tokenize_limited(&self, text: &str, max_tokens: usize) -> (Vec<(usize, usize, f32, u32)>, bool) {
+    pub fn tokenize_limited(
+        &self,
+        text: &str,
+        max_tokens: usize,
+    ) -> (Vec<(usize, usize, f32, u32)>, bool) {
         let bytes = text.as_bytes();
         let mut tokens = Vec::new();
         let mut pos = 0;
@@ -135,6 +144,66 @@ impl TokenizerTrie {
         let mut stats = TrieStats::default();
         self.count_nodes(&self.root, &mut stats);
         stats
+    }
+
+    /// Search for all tokens that start with the given prefix.
+    /// Returns a vector of (id, token_string, score, token_type).
+    /// Uses depth-first search to find all matching tokens efficiently.
+    pub fn search_prefix(&self, prefix: &str) -> Vec<(usize, String, f32, u32)> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+
+        let prefix_bytes = prefix.as_bytes();
+        let mut results = Vec::new();
+
+        // Navigate to the node corresponding to the prefix
+        let mut node = &self.root;
+        for &byte in prefix_bytes {
+            match node.children.get(&byte) {
+                Some(child) => node = child,
+                None => return Vec::new(), // No tokens match this prefix
+            };
+        }
+
+        // DFS to collect all tokens under this prefix
+        self.collect_tokens(node, prefix.to_string(), &mut results);
+
+        // Sort by token length (shorter first), then by score (higher first)
+        results.sort_by(|a, b| {
+            let len_cmp = a.1.len().cmp(&b.1.len());
+            if len_cmp == std::cmp::Ordering::Equal {
+                b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                len_cmp
+            }
+        });
+
+        results
+    }
+
+    fn collect_tokens(
+        &self,
+        node: &TrieNode,
+        current_prefix: String,
+        results: &mut Vec<(usize, String, f32, u32)>,
+    ) {
+        // If this node represents a complete token, add it
+        if let (Some(id), Some(metadata)) = (node.token_id, &node.token_data) {
+            results.push((
+                id,
+                current_prefix.clone(),
+                metadata.score,
+                metadata.token_type,
+            ));
+        }
+
+        // Recursively collect from children
+        for (&byte, child) in &node.children {
+            let bytes = [byte];
+            let next_char = String::from_utf8_lossy(&bytes);
+            self.collect_tokens(child, format!("{}{}", current_prefix, next_char), results);
+        }
     }
 
     fn count_nodes(&self, node: &TrieNode, stats: &mut TrieStats) {
@@ -174,7 +243,8 @@ pub mod simd {
     /// This can be used to skip ahead in certain tokenization scenarios.
     #[inline]
     pub fn find_next_boundary(text: &[u8], start: usize) -> Option<usize> {
-        text[start..].iter()
+        text[start..]
+            .iter()
             .position(|&b| matches!(b, b' ' | b'\n' | b'\t' | b'\r' | b'.' | b',' | b'!' | b'?'))
             .map(|pos| start + pos)
     }
@@ -241,9 +311,7 @@ mod tests {
     fn test_no_match() {
         let mut trie = TokenizerTrie::new();
 
-        let tokens = vec![
-            (0, "hello".to_string(), 0.0, 0),
-        ];
+        let tokens = vec![(0, "hello".to_string(), 0.0, 0)];
 
         trie.build(&tokens);
 
@@ -255,9 +323,7 @@ mod tests {
     fn test_limited_tokenization() {
         let mut trie = TokenizerTrie::new();
 
-        let tokens = vec![
-            (0, "a".to_string(), 0.0, 0),
-        ];
+        let tokens = vec![(0, "a".to_string(), 0.0, 0)];
 
         trie.build(&tokens);
 

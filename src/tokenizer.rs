@@ -1,12 +1,14 @@
-use gtk::prelude::*;
-use gtk::{glib, Box as GtkBox, Orientation, ScrolledWindow, SearchEntry};
 use adw::prelude::*;
+use adw::prelude::*;
+use gtk::prelude::*;
+use gtk::{glib, Box as GtkBox, Filter, Orientation, ScrolledWindow, SearchEntry};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::gguf_parser::{GGUFFile, MetadataValue};
-use crate::token_display::{TokenDisplay, TokenInfo};
 use crate::optimized_tokenizer::TokenizerTrie;
+use crate::token_display::{TokenDisplay, TokenInfo};
 
 #[derive(Clone)]
 pub struct TokenizerPage {
@@ -19,6 +21,7 @@ pub struct TokenizerPage {
     token_display: TokenDisplay,
     summary_label: gtk::Label,
     debounce_cancelled: Rc<RefCell<bool>>,
+    vocab_title: adw::WindowTitle,
 }
 
 #[derive(Clone, Debug)]
@@ -51,9 +54,7 @@ impl TokenizerPage {
             .show_start_title_buttons(false)
             .build();
 
-        let tester_title = adw::WindowTitle::builder()
-            .title("Token Tester")
-            .build();
+        let tester_title = adw::WindowTitle::builder().title("Token Tester").build();
         tester_header.set_title_widget(Some(&tester_title));
 
         tester_box.append(&tester_header);
@@ -66,9 +67,7 @@ impl TokenizerPage {
         tester_content.set_margin_end(18);
 
         // Input section with proper card styling
-        let input_group = adw::PreferencesGroup::builder()
-            .title("Input")
-            .build();
+        let input_group = adw::PreferencesGroup::builder().title("Input").build();
 
         let test_input = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -145,9 +144,7 @@ impl TokenizerPage {
             .show_start_title_buttons(false)
             .build();
 
-        let vocab_title = adw::WindowTitle::builder()
-            .title("Vocabulary")
-            .build();
+        let vocab_title = adw::WindowTitle::builder().title("Vocabulary").build();
         vocab_header.set_title_widget(Some(&vocab_title));
 
         vocab_box.append(&vocab_header);
@@ -180,14 +177,10 @@ impl TokenizerPage {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
 
             // Create a more detailed row layout
-            let row = adw::ActionRow::builder()
-                .build();
+            let row = adw::ActionRow::builder().build();
 
             // Add a label for the token ID on the left
-            let id_label = gtk::Label::builder()
-                .width_chars(6)
-                .xalign(1.0)
-                .build();
+            let id_label = gtk::Label::builder().width_chars(6).xalign(1.0).build();
             id_label.add_css_class("dim-label");
             id_label.add_css_class("numeric");
             row.add_prefix(&id_label);
@@ -197,14 +190,13 @@ impl TokenizerPage {
 
         factory.connect_bind(move |_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
-            let item = list_item.item()
+            let item = list_item
+                .item()
                 .and_downcast::<glib::BoxedAnyObject>()
                 .unwrap();
             let token_data = item.borrow::<TokenData>();
 
-            let row = list_item.child()
-                .and_downcast::<adw::ActionRow>()
-                .unwrap();
+            let row = list_item.child().and_downcast::<adw::ActionRow>().unwrap();
 
             // Update ID label
             if let Some(id_label) = row.first_child() {
@@ -218,12 +210,19 @@ impl TokenizerPage {
             row.set_title(&format!("\"{}\"", escaped_token));
 
             // Show score and type as subtitle with better formatting
-            let subtitle = format!("score: {:.4}  •  type: {}",
-                token_data.score, format_token_type(token_data.token_type));
+            let subtitle = format!(
+                "score: {:.4}  •  type: {}",
+                token_data.score,
+                format_token_type(token_data.token_type)
+            );
             row.set_subtitle(&subtitle);
         });
 
         let list_view = gtk::ListView::new(Some(selection_model.clone()), Some(factory));
+
+        // Use SingleSelection for single selection mode (no filtering needed since we manually update items)
+        let selection_model_new = gtk::SingleSelection::new(Some(model.clone()));
+        list_view.set_model(Some(&selection_model_new));
 
         let vocab_scrolled = ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -285,23 +284,56 @@ impl TokenizerPage {
             token_display: token_display.clone(),
             summary_label: summary_label.clone(),
             debounce_cancelled: Rc::new(RefCell::new(false)),
+            vocab_title: vocab_title.clone(),
         };
 
-        // Connect search
-        let token_store_weak = Rc::downgrade(&token_store);
+        // Store model reference for search
         let model_clone = model.clone();
+
+        // Connect search - manually update list with limited results
+        let token_store_weak = Rc::downgrade(&token_store);
+        let trie_weak = Rc::downgrade(&tokenizer_trie);
+
         search_entry.connect_search_changed(move |entry| {
-            if let Some(store) = token_store_weak.upgrade() {
-                let query = entry.text().to_lowercase();
+            let query = entry.text();
+
+            let store = token_store_weak.upgrade();
+            let trie = trie_weak.upgrade();
+
+            if let (Some(store), Some(trie)) = (store, trie) {
                 let tokens = store.borrow();
+                let trie = trie.borrow();
 
-                model_clone.remove_all();
+                // Get the list store directly
+                let list_store = model_clone.downcast_ref::<gio::ListStore>().unwrap();
+                list_store.remove_all();
 
-                for token in tokens.iter() {
-                    if query.is_empty() ||
-                       token.token.to_lowercase().contains(&query) ||
-                       token.id.to_string().contains(&query) {
-                        model_clone.append(&glib::BoxedAnyObject::new(token.clone()));
+                if query.is_empty() {
+                    // Show initial subset
+                    for token in tokens.iter().take(1000) {
+                        list_store.append(&glib::BoxedAnyObject::new(token.clone()));
+                    }
+                } else {
+                    // Try trie-based prefix search first
+                    let search_results = trie.search_prefix(&query.to_lowercase());
+
+                    let matching: Vec<_> = if !search_results.is_empty() {
+                        search_results.iter().map(|(id, _, _, _)| *id).collect()
+                    } else {
+                        // Fall back to ID-based search
+                        let query_lower = query.to_lowercase();
+                        tokens
+                            .iter()
+                            .filter(|t| t.id.to_string().contains(&query_lower))
+                            .map(|t| t.id)
+                            .collect()
+                    };
+
+                    // Only display up to 250 results
+                    for id in matching.iter().take(250) {
+                        if let Some(token) = tokens.get(*id) {
+                            list_store.append(&glib::BoxedAnyObject::new(token.clone()));
+                        }
                     }
                 }
             }
@@ -333,11 +365,16 @@ impl TokenizerPage {
                     *cancelled_weak.borrow_mut() = false;
                     return glib::ControlFlow::Break;
                 }
-                if let (Some(store), Some(trie), Some(buffer)) = (store_weak.upgrade(), trie_weak.upgrade(), buffer_weak.upgrade()) {
+                if let (Some(store), Some(trie), Some(buffer)) = (
+                    store_weak.upgrade(),
+                    trie_weak.upgrade(),
+                    buffer_weak.upgrade(),
+                ) {
                     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
 
                     // Use optimized trie-based tokenization
-                    let (token_infos, char_count) = tokenize_to_display_optimized(&text, &store.borrow(), &trie.borrow());
+                    let (token_infos, char_count) =
+                        tokenize_to_display_optimized(&text, &store.borrow(), &trie.borrow());
 
                     // Update summary label
                     if !token_infos.is_empty() {
@@ -431,37 +468,61 @@ impl TokenizerPage {
 
         *self.token_store.borrow_mut() = tokens.clone();
 
+        // Update vocabulary title with token count
+        self.vocab_title
+            .set_subtitle(&format!("{} tokens", tokens.len()));
+
         // Build optimized trie from tokens for fast tokenization
         let mut trie = self.tokenizer_trie.borrow_mut();
-        let token_tuples: Vec<(usize, String, f32, u32)> = tokens.iter()
+        let token_tuples: Vec<(usize, String, f32, u32)> = tokens
+            .iter()
             .map(|t| (t.id, t.token.clone(), t.score, t.token_type))
             .collect();
         trie.build(&token_tuples);
 
         // Print trie stats for debugging/optimization
         let stats = trie.memory_stats();
-        println!("Tokenizer trie built: {} nodes, {} tokens, ~{} KB memory",
-                 stats.node_count, stats.token_count, stats.estimated_memory_bytes() / 1024);
+        println!(
+            "Tokenizer trie built: {} nodes, {} tokens, ~{} KB memory",
+            stats.node_count,
+            stats.token_count,
+            stats.estimated_memory_bytes() / 1024
+        );
 
-        // Update list view
+        // Update list view - only load a subset initially to avoid freezing
+        const MAX_INITIAL_TOKENS: usize = 1000;
+        const MAX_SEARCH_RESULTS: usize = 250;
+
+        // Update list view - get model from list view
         if let Some(selection_model) = self.list_view.model() {
-            if let Some(selection_model) = selection_model.downcast_ref::<gtk::NoSelection>() {
+            if let Some(selection_model) = selection_model.downcast_ref::<gtk::SingleSelection>() {
                 if let Some(model) = selection_model.model() {
                     let list_store = model.downcast_ref::<gio::ListStore>().unwrap();
                     list_store.remove_all();
 
-                    // Only show first 1000 tokens initially for performance
-                    for token in tokens.iter().take(1000) {
+                    // Only load first 1000 tokens initially
+                    for token in tokens.iter().take(MAX_INITIAL_TOKENS) {
                         list_store.append(&glib::BoxedAnyObject::new(token.clone()));
                     }
                 }
             }
         }
+
+        // Store total count for reference
+        let total_tokens = tokens.len();
+        println!(
+            "Tokenizer loaded: {} tokens available, displaying up to {} at a time",
+            total_tokens,
+            MAX_SEARCH_RESULTS.max(MAX_INITIAL_TOKENS)
+        );
     }
 }
 
 fn escape_token(token: &str) -> String {
     token
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
@@ -480,7 +541,11 @@ fn format_token_type(token_type: u32) -> &'static str {
     }
 }
 
-fn tokenize_to_display_optimized(text: &str, tokens: &[TokenData], trie: &TokenizerTrie) -> (Vec<TokenInfo>, usize) {
+fn tokenize_to_display_optimized(
+    text: &str,
+    tokens: &[TokenData],
+    trie: &TokenizerTrie,
+) -> (Vec<TokenInfo>, usize) {
     if text.is_empty() || text == "Enter text to tokenize..." {
         return (Vec::new(), 0);
     }
@@ -609,7 +674,10 @@ fn tokenize_simple(text: &str, tokens: &[TokenData]) -> String {
     result.push_str(&format!("─────────────────────\n"));
     result.push_str(&format!("Tokens: {}\n", token_matches.len()));
     result.push_str(&format!("Characters: {}\n", text.len()));
-    result.push_str(&format!("Ratio: {:.2} chars/token\n\n", text.len() as f64 / token_matches.len() as f64));
+    result.push_str(&format!(
+        "Ratio: {:.2} chars/token\n\n",
+        text.len() as f64 / token_matches.len() as f64
+    ));
 
     // Token breakdown
     result.push_str("🔤 Token Breakdown\n");
