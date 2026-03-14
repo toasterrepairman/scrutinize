@@ -21,7 +21,7 @@ pub struct TokenizerPage {
     token_display: TokenDisplay,
     summary_label: gtk::Label,
     debounce_cancelled: Rc<RefCell<bool>>,
-    vocab_title: adw::WindowTitle,
+    vocab_title: gtk::Label,
 }
 
 #[derive(Clone, Debug)]
@@ -46,18 +46,15 @@ impl TokenizerPage {
 
         // === Token Tester Section (Top) ===
         let tester_box = GtkBox::new(Orientation::Vertical, 0);
-        tester_box.add_css_class("toolbar");
 
-        // Header for tester section
-        let tester_header = adw::HeaderBar::builder()
-            .show_end_title_buttons(false)
-            .show_start_title_buttons(false)
-            .build();
-
-        let tester_title = adw::WindowTitle::builder().title("Token Tester").build();
-        tester_header.set_title_widget(Some(&tester_title));
-
-        tester_box.append(&tester_header);
+        // Section title
+        let tester_title = gtk::Label::new(Some("Token Tester"));
+        tester_title.add_css_class("title-2");
+        tester_title.set_halign(gtk::Align::Start);
+        tester_title.set_margin_top(12);
+        tester_title.set_margin_start(12);
+        tester_title.set_margin_end(12);
+        tester_box.append(&tester_title);
 
         // Tester content in a clamp for better readability
         let tester_content = GtkBox::new(Orientation::Vertical, 18);
@@ -156,16 +153,14 @@ impl TokenizerPage {
         // === Vocabulary List Section (Bottom) ===
         let vocab_box = GtkBox::new(Orientation::Vertical, 0);
 
-        // Header for vocabulary section
-        let vocab_header = adw::HeaderBar::builder()
-            .show_end_title_buttons(false)
-            .show_start_title_buttons(false)
-            .build();
-
-        let vocab_title = adw::WindowTitle::builder().title("Vocabulary").build();
-        vocab_header.set_title_widget(Some(&vocab_title));
-
-        vocab_box.append(&vocab_header);
+        // Section title
+        let vocab_title = gtk::Label::new(Some("Vocabulary"));
+        vocab_title.add_css_class("title-2");
+        vocab_title.set_halign(gtk::Align::Start);
+        vocab_title.set_margin_top(12);
+        vocab_title.set_margin_start(12);
+        vocab_title.set_margin_end(12);
+        vocab_box.append(&vocab_title);
 
         // Search bar for vocabulary
         let search_bar_box = GtkBox::new(Orientation::Horizontal, 0);
@@ -551,7 +546,7 @@ impl TokenizerPage {
 
         // Update vocabulary title with token count
         self.vocab_title
-            .set_subtitle(&format!("{} tokens", tokens.len()));
+            .set_text(&format!("Vocabulary ({} tokens)", tokens.len()));
 
         // Build optimized trie from tokens for fast tokenization
         let mut trie = self.tokenizer_trie.borrow_mut();
