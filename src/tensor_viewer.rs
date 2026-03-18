@@ -6,16 +6,29 @@ use std::rc::Rc;
 
 use crate::gguf_parser::{GGUFFile, TensorInfo};
 
-#[derive(Clone)]
-pub struct TensorPage {
-    widget: adw::Bin,
-    tensor_list: gtk::ListView,
-    memory_viz: DrawingArea,
-    tensors: Rc<RefCell<Vec<TensorInfo>>>,
-    gguf_file: Rc<RefCell<Option<GGUFFile>>>, // Store reference to GGUFFile for optimized access
-    system_info: Rc<RefCell<SystemMemoryInfo>>,
-    file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
-}
+ #[derive(Clone)]
+ pub struct TensorPage {
+     widget: adw::Bin,
+     tensor_list: gtk::ListView,
+     memory_viz: DrawingArea,
+     tensors: Rc<RefCell<Vec<TensorInfo>>>,
+     gguf_file: Rc<RefCell<Option<GGUFFile>>>, // Store reference to GGUFFile for optimized access
+     system_info: Rc<RefCell<SystemMemoryInfo>>,
+     file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
+     memory_regions: Rc<RefCell<Vec<HoverRegion>>>,
+ }
+
+ #[derive(Clone)]
+ struct HoverRegion {
+     name: String,
+     used_bytes: u64,
+     model_bytes: u64,
+     capacity_bytes: u64,
+     x: f64,
+     y: f64,
+     width: f64,
+     height: f64,
+ }
 
 /// Calculate adaptive maximum elements based on tensor size and display constraints
 /// Implements intelligent scaling to preserve structure while maintaining performance
@@ -221,6 +234,7 @@ impl TensorPage {
 
         // Get system memory info
         let system_info = Rc::new(RefCell::new(get_system_memory_info()));
+        let memory_regions: Rc<RefCell<Vec<HoverRegion>>> = Rc::new(RefCell::new(Vec::new()));
 
         let page = Self {
             widget,
@@ -230,16 +244,55 @@ impl TensorPage {
             gguf_file: gguf_file.clone(),
             system_info: system_info.clone(),
             file_path: file_path.clone(),
+            memory_regions: memory_regions.clone(),
         };
 
         // Connect drawing
         let tensors_weak = Rc::downgrade(&tensors);
         let system_info_weak = Rc::downgrade(&system_info);
+        let memory_regions_weak = Rc::downgrade(&memory_regions);
         memory_viz.set_draw_func(move |_, cr, width, height| {
-            if let (Some(tensors), Some(sys_info)) = (tensors_weak.upgrade(), system_info_weak.upgrade()) {
-                draw_memory_visualization(cr, width, height, &tensors.borrow(), &sys_info.borrow());
+            if let (Some(tensors), Some(sys_info), Some(mem_regions)) = (
+                tensors_weak.upgrade(),
+                system_info_weak.upgrade(),
+                memory_regions_weak.upgrade()
+            ) {
+                let regions = draw_memory_visualization(cr, width, height, &tensors.borrow(), &sys_info.borrow());
+                *mem_regions.borrow_mut() = regions;
             }
         });
+
+        // Add tooltip on hover
+        let memory_regions_hover = Rc::clone(&memory_regions);
+        let motion_controller = gtk::EventControllerMotion::new();
+        motion_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        motion_controller.connect_motion(move |controller, x, y| {
+            let widget = controller.widget().unwrap();
+            let x = x as f64;
+            let y = y as f64;
+
+            // Check if mouse is over any region
+            let mut tooltip_text = None;
+            for region in memory_regions_hover.borrow().iter() {
+                if x >= region.x && x <= region.x + region.width &&
+                   y >= region.y && y <= region.y + region.height {
+                    let memory_text = if region.model_bytes > 0 {
+                        format!("Model: {}", format_bytes(region.model_bytes))
+                    } else {
+                        format!("Used: {}", format_bytes(region.used_bytes))
+                    };
+                    tooltip_text = Some(format!("<b>{}</b>\n{}", region.name, memory_text));
+                    break;
+                }
+            }
+
+            if let Some(text) = tooltip_text {
+                widget.set_tooltip_markup(Some(&text));
+            } else {
+                widget.set_tooltip_markup(None);
+            }
+        });
+        memory_viz.add_controller(motion_controller);
 
         page
     }
@@ -833,16 +886,18 @@ fn get_gpu_info() -> Vec<GPUInfo> {
     gpus
 }
 
-fn draw_memory_visualization(
-    cr: &gtk::cairo::Context,
-    width: i32,
-    height: i32,
-    tensors: &[TensorInfo],
-    system_info: &SystemMemoryInfo,
-) {
-    if tensors.is_empty() {
-        return;
-    }
+ fn draw_memory_visualization(
+     cr: &gtk::cairo::Context,
+     width: i32,
+     height: i32,
+     tensors: &[TensorInfo],
+     system_info: &SystemMemoryInfo,
+ ) -> Vec<HoverRegion> {
+     let mut hover_regions = Vec::new();
+
+     if tensors.is_empty() {
+         return hover_regions;
+     }
 
     let width = width as f64;
     let height = height as f64;
@@ -911,52 +966,77 @@ fn draw_memory_visualization(
         let model_fill_ratio = model_allocated as f64 / region.capacity as f64;
         let total_fill_ratio = total_usage as f64 / region.capacity as f64;
 
-        // Use GNOME HIG colors (adapted for dark/light theme)
-        // Background: card background
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.1);
-        draw_rounded_rect(cr, margin, region.y_pos, width - 2.0 * margin, bar_height, corner_radius);
-        cr.fill().unwrap();
+         // Use GNOME HIG colors (adapted for dark/light theme)
+         // Background: card background
+         cr.set_source_rgba(0.0, 0.0, 0.0, 0.1);
+         draw_rounded_rect(cr, margin, region.y_pos, width - 2.0 * margin, bar_height, corner_radius);
+         cr.fill().unwrap();
 
-        let bar_margin = 8.0;
-        let bar_inner_height = 20.0;
-        let bar_y = region.y_pos + bar_height - bar_margin - bar_inner_height;
-        let bar_width = width - 2.0 * margin - 2.0 * bar_margin;
+         let bar_margin = 8.0;
+         let bar_inner_height = 20.0;
+         let bar_y = region.y_pos + bar_height - bar_margin - bar_inner_height;
+         let bar_width = width - 2.0 * margin - 2.0 * bar_margin;
+         let bar_x = margin + bar_margin;
 
-        // Draw background bar (unfilled)
-        cr.set_source_rgba(0.5, 0.5, 0.5, 0.2);
-        draw_rounded_rect(cr, margin + bar_margin, bar_y, bar_width, bar_inner_height, 4.0);
-        cr.fill().unwrap();
+         // Draw background bar (unfilled)
+         cr.set_source_rgba(0.5, 0.5, 0.5, 0.2);
+         draw_rounded_rect(cr, bar_x, bar_y, bar_width, bar_inner_height, 4.0);
+         cr.fill().unwrap();
 
-        // Draw currently used memory (darker)
-        if region.used > 0 {
-            let used_width = bar_width * base_fill_ratio;
-            if region.is_gpu {
-                cr.set_source_rgba(0.20, 0.47, 0.80, 0.6); // Blue (muted)
-            } else {
-                cr.set_source_rgba(0.37, 0.62, 0.31, 0.6); // Green (muted)
-            }
-            draw_rounded_rect(cr, margin + bar_margin, bar_y, used_width, bar_inner_height, 4.0);
-            cr.fill().unwrap();
-        }
+         // Draw currently used memory (darker)
+         if region.used > 0 {
+             let used_width = bar_width * base_fill_ratio;
+             if region.is_gpu {
+                 cr.set_source_rgba(0.20, 0.47, 0.80, 0.6); // Blue (muted)
+             } else {
+                 cr.set_source_rgba(0.37, 0.62, 0.31, 0.6); // Green (muted)
+             }
+             draw_rounded_rect(cr, bar_x, bar_y, used_width, bar_inner_height, 4.0);
+             cr.fill().unwrap();
 
-        // Draw model allocation (brighter, overlaid)
-        if model_allocated > 0 {
-            let start_x = margin + bar_margin + (bar_width * base_fill_ratio);
-            let model_width = bar_width * model_fill_ratio;
+             // Add hover region for used memory
+             hover_regions.push(HoverRegion {
+                 name: format!("{} - Currently Used", region.name),
+                 used_bytes: region.used,
+                 model_bytes: 0,
+                 capacity_bytes: region.capacity,
+                 x: bar_x,
+                 y: bar_y,
+                 width: used_width,
+                 height: bar_inner_height,
+             });
+         }
 
-            // Determine color based on total usage after adding model
-            if total_fill_ratio > 0.95 {
-                cr.set_source_rgba(0.91, 0.28, 0.24, 1.0); // GNOME red (error)
-            } else if total_fill_ratio > 0.85 {
-                cr.set_source_rgba(0.95, 0.60, 0.00, 1.0); // GNOME orange (warning)
-            } else if region.is_gpu {
-                cr.set_source_rgba(0.25, 0.59, 0.95, 1.0); // GNOME blue (accent)
-            } else {
-                cr.set_source_rgba(0.46, 0.78, 0.39, 1.0); // GNOME green (success)
-            }
-            draw_rounded_rect(cr, start_x, bar_y, model_width, bar_inner_height, 4.0);
-            cr.fill().unwrap();
-        }
+         // Draw model allocation (brighter, overlaid)
+         if model_allocated > 0 {
+             let start_x = bar_x + (bar_width * base_fill_ratio);
+             let model_width = bar_width * model_fill_ratio;
+
+             // Determine color based on total usage after adding model
+             if total_fill_ratio > 0.95 {
+                 cr.set_source_rgba(0.91, 0.28, 0.24, 1.0); // GNOME red (error)
+             } else if total_fill_ratio > 0.85 {
+                 cr.set_source_rgba(0.95, 0.60, 0.00, 1.0); // GNOME orange (warning)
+             } else if region.is_gpu {
+                 cr.set_source_rgba(0.25, 0.59, 0.95, 1.0); // GNOME blue (accent)
+             } else {
+                 cr.set_source_rgba(0.46, 0.78, 0.39, 1.0); // GNOME green (success)
+             }
+             draw_rounded_rect(cr, start_x, bar_y, model_width, bar_inner_height, 4.0);
+             cr.fill().unwrap();
+
+             // Add hover region for model allocation
+             hover_regions.push(HoverRegion {
+                 name: format!("{} - Model Allocation", region.name),
+                 used_bytes: 0,
+                 model_bytes: model_allocated,
+                 capacity_bytes: region.capacity,
+                 x: start_x,
+                 y: bar_y,
+                 width: model_width,
+                 height: bar_inner_height,
+             });
+         }
 
         // Draw text labels (responsive to container width)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
@@ -1070,6 +1150,8 @@ fn draw_memory_visualization(
         cr.move_to(warning_x + box_size + 6.0, legend_y);
         cr.show_text(">85% Full").unwrap();
     }
+
+    hover_regions
 }
 
 fn draw_rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
