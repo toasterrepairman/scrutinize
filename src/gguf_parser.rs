@@ -1996,8 +1996,20 @@ fn read_metadata_kv<R: Read>(reader: &mut R) -> Result<(String, MetadataValue), 
     let value_type = read_u32(reader)?;
 
     let value = match value_type {
-        0 => MetadataValue::UInt8(reader.read_exact(&mut [0u8; 1]).map(|_| 0).unwrap()),
-        1 => MetadataValue::Int8(reader.read_exact(&mut [0u8; 1]).map(|_| 0).unwrap()),
+        0 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read u8: {}", e))?;
+            MetadataValue::UInt8(buf[0])
+        }
+        1 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read i8: {}", e))?;
+            MetadataValue::Int8(buf[0] as i8)
+        }
         2 => MetadataValue::UInt16({
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf).unwrap();
@@ -2011,7 +2023,13 @@ fn read_metadata_kv<R: Read>(reader: &mut R) -> Result<(String, MetadataValue), 
         4 => MetadataValue::UInt32(read_u32(reader)?),
         5 => MetadataValue::Int32(read_i32(reader)?),
         6 => MetadataValue::Float32(read_f32(reader)?),
-        7 => MetadataValue::Bool(reader.read_exact(&mut [0u8; 1]).map(|_| true).unwrap()),
+        7 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read bool: {}", e))?;
+            MetadataValue::Bool(buf[0] != 0)
+        }
         8 => MetadataValue::String(read_string(reader)?),
         9 => {
             let arr_type = read_u32(reader)?;
@@ -2042,10 +2060,70 @@ fn read_metadata_kv<R: Read>(reader: &mut R) -> Result<(String, MetadataValue), 
 
 fn read_array_element<R: Read>(reader: &mut R, elem_type: u32) -> Result<MetadataValue, String> {
     match elem_type {
+        0 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read u8: {}", e))?;
+            Ok(MetadataValue::UInt8(buf[0]))
+        }
+        1 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read i8: {}", e))?;
+            Ok(MetadataValue::Int8(buf[0] as i8))
+        }
+        2 => {
+            let mut buf = [0u8; 2];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read u16: {}", e))?;
+            Ok(MetadataValue::UInt16(u16::from_le_bytes(buf)))
+        }
+        3 => {
+            let mut buf = [0u8; 2];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read i16: {}", e))?;
+            Ok(MetadataValue::Int16(i16::from_le_bytes(buf)))
+        }
         4 => Ok(MetadataValue::UInt32(read_u32(reader)?)),
         5 => Ok(MetadataValue::Int32(read_i32(reader)?)),
         6 => Ok(MetadataValue::Float32(read_f32(reader)?)),
+        7 => {
+            let mut buf = [0u8; 1];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read bool: {}", e))?;
+            Ok(MetadataValue::Bool(buf[0] != 0))
+        }
         8 => Ok(MetadataValue::String(read_string(reader)?)),
+        9 => {
+            let arr_type = read_u32(reader)?;
+            let arr_len = read_u64(reader)?;
+            let mut arr = Vec::new();
+            for _ in 0..arr_len {
+                let elem = read_array_element(reader, arr_type)?;
+                arr.push(elem);
+            }
+            Ok(MetadataValue::Array(arr))
+        }
+        10 => Ok(MetadataValue::UInt64(read_u64(reader)?)),
+        11 => {
+            let mut buf = [0u8; 8];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read i64: {}", e))?;
+            Ok(MetadataValue::Int64(i64::from_le_bytes(buf)))
+        }
+        12 => {
+            let mut buf = [0u8; 8];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read f64: {}", e))?;
+            Ok(MetadataValue::Float64(f64::from_le_bytes(buf)))
+        }
         _ => Err(format!("Unsupported array element type: {}", elem_type)),
     }
 }
