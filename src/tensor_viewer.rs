@@ -33,33 +33,21 @@ use crate::gguf_parser::{GGUFFile, TensorInfo};
 /// Calculate adaptive maximum elements based on tensor size and display constraints
 /// Implements intelligent scaling to preserve structure while maintaining performance
 fn calculate_adaptive_max_elements(total_elements: usize) -> usize {
-    // Base limits for different size categories - more conservative to prevent crashes
     match total_elements {
-        // Small tensors: show everything, no downsampling needed
         0..=25_000 => total_elements,
+        25_001..=500_000 => std::cmp::min(total_elements, 500_000),
+        500_001..=5_000_000 => std::cmp::min(total_elements, 1_000_000),
+        5_000_001..=50_000_000 => 1_000_000,
+        _ => 1_500_000,
+    }
+}
 
-        // Medium tensors: allow up to 500K elements for good detail
-        25_001..=500_000 => {
-            // Calculate reasonable limit that preserves detail but fits in widget
-            std::cmp::min(total_elements, 500_000)
-        }
-
-        // Large tensors: smart downsampling with reasonable limits
-        500_001..=5_000_000 => {
-            // Allow up to 1M elements with smart downsampling
-            std::cmp::min(total_elements, 1_000_000)
-        }
-
-        // Very large tensors: aggressive downsampling to fit viewport
-        5_000_001..=50_000_000 => {
-            // Target ~1K x 1K resolution max = 1M elements
-            1_000_000
-        }
-
-        // Extremely large tensors: strict limits to prevent crashes
+fn calculate_zoomable_max_elements(total_elements: usize) -> usize {
+    match total_elements {
+        0..=1_000_000 => total_elements,
         _ => {
-            // Cap at 1.5M elements maximum (fits in ~1200x1200 viewport)
-            1_500_000
+            let max_dim = 8192;
+            (max_dim * max_dim).min(total_elements)
         }
     }
 }
@@ -358,8 +346,8 @@ impl TensorPage {
 
     fn show_tensor_popover(parent: &gtk::Widget, tensor: &TensorInfo, file_path: &std::path::Path) {
         use crate::heatmap_widget::HeatmapWidget;
+        use crate::zoomable_view::ZoomableView;
 
-        // Ensure parent is realized before creating popover
         if !parent.is_realized() {
             parent.realize();
         }
@@ -515,9 +503,15 @@ impl TensorPage {
 
         content.append(&loading_box);
 
+        let is_1d_tensor = tensor.dimensions.len() == 1;
+
         let heatmap_widget = HeatmapWidget::new();
         heatmap_widget.widget().set_visible(false);
         content.append(heatmap_widget.widget());
+
+        let zoomable_view = ZoomableView::new();
+        zoomable_view.widget().set_visible(false);
+        content.append(zoomable_view.widget());
 
         // Statistics section (initially hidden)
         let stats_separator = gtk::Separator::new(Orientation::Horizontal);
@@ -552,6 +546,7 @@ impl TensorPage {
         let tensor_clone = tensor.clone();
         let file_path_clone = file_path.to_path_buf();
         let heatmap_weak = heatmap_widget.clone();
+        let zoomable_weak = zoomable_view.clone();
         let loading_box_weak = loading_box.downgrade();
         let status_weak = status_label.downgrade();
         let stats_separator_weak = stats_separator.downgrade();
@@ -566,7 +561,7 @@ impl TensorPage {
             // Calculate adaptive max elements based on tensor dimensions
             // Allow larger tensors but implement intelligent downsampling
             let total_elements = tensor_clone.dimensions.iter().product::<u64>() as usize;
-            let max_elements = calculate_adaptive_max_elements(total_elements);
+            let max_elements = calculate_zoomable_max_elements(total_elements);
 
             eprintln!("Tensor {} loaded: shape={:?}, total_elements={}, dtype={:?}, max_elements={}",
                 tensor_clone.name, tensor_clone.dimensions, total_elements, tensor_clone.dtype, max_elements);
@@ -592,6 +587,7 @@ impl TensorPage {
             let tensor_for_callback = tensor_clone.clone();
             let file_path_for_callback = file_path_clone.clone();
             let heatmap_for_callback = heatmap_weak.clone();
+            let zoomable_for_callback = zoomable_weak.clone();
             let status_for_callback = status_weak.clone();
             let loading_for_callback = loading_box_weak.clone();
 
@@ -600,10 +596,10 @@ impl TensorPage {
                 let tensor = tensor_for_callback.clone();
                 let path = file_path_for_callback.clone();
                 let heatmap = heatmap_for_callback.clone();
+                let zoomable = zoomable_for_callback.clone();
                 let status = status_for_callback.clone();
                 let loading = loading_for_callback.clone();
 
-                // Show loading indicator
                 if let Some(loading_box) = loading.upgrade() {
                     loading_box.set_visible(true);
                 }
@@ -612,17 +608,14 @@ impl TensorPage {
                     label.remove_css_class("error");
                 }
 
-                // Spawn async task to reload data
                 glib::spawn_future_local(async move {
-                    // Calculate adaptive max elements for the new slice
                     let slice_elements = if let (h, w) = new_selection.slice_shape() {
                         (h * w) as usize
                     } else {
                         tensor.element_count() as usize
                     };
-                    let max_elements = calculate_adaptive_max_elements(slice_elements);
+                    let max_elements = calculate_zoomable_max_elements(slice_elements);
 
-                    // Run blocking I/O in a background thread to avoid blocking UI
                     let (tx, rx) = async_channel::unbounded();
                     let tensor = tensor.clone();
                     let path = path.clone();
@@ -638,10 +631,18 @@ impl TensorPage {
                     match result {
                         Ok(data) => {
                             let (h, w) = new_selection.slice_shape();
-                            heatmap.set_data(data, &vec![h, w]);
+                            heatmap.set_data(data.clone(), &vec![h, w]);
+
+                            if !data.is_empty() {
+                                let data_min = data.iter().copied().filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min);
+                                let data_max = data.iter().copied().filter(|v| v.is_finite()).fold(f32::NEG_INFINITY, f32::max);
+                                if data_min.is_finite() && data_max.is_finite() {
+                                    zoomable.set_tensor_data(&data, w as i32, h as i32, data_min, data_max);
+                                    zoomable.set_legend(data_min, data_max);
+                                }
+                            }
                             eprintln!("Data reloaded successfully for new slice");
 
-                            // Hide loading indicator
                             if let Some(loading_box) = loading.upgrade() {
                                 loading_box.set_visible(false);
                             }
@@ -649,7 +650,6 @@ impl TensorPage {
                         Err(e) => {
                             eprintln!("Error reloading slice data: {}", e);
 
-                            // Hide spinner, show error
                             if let Some(loading_box) = loading.upgrade() {
                                 loading_box.set_visible(false);
                             }
@@ -678,7 +678,6 @@ impl TensorPage {
 
             match result {
                 Ok(data) => {
-                    // Get the shape to display based on slice selection
                     let display_shape = if let Some(ref sel) = slice_selection {
                         let (h, w) = sel.slice_shape();
                         vec![h, w]
@@ -686,17 +685,37 @@ impl TensorPage {
                         tensor_clone.dimensions.clone()
                     };
 
-                    // Auto-detect 1D tensors and switch to line plot mode
                     let is_1d = tensor_clone.dimensions.len() == 1;
+
+                    heatmap_weak.set_data(data.clone(), &display_shape);
+
                     if is_1d {
                         heatmap_weak.set_display_mode_line_plot();
+                        heatmap_weak.widget().set_visible(true);
+                        zoomable_weak.widget().set_visible(false);
                         eprintln!("Tensor {} is 1D, using line plot mode", tensor_clone.name);
+                    } else {
+                        heatmap_weak.widget().set_visible(false);
+
+                        if !data.is_empty() {
+                            let data_min = data.iter().copied().filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min);
+                            let data_max = data.iter().copied().filter(|v| v.is_finite()).fold(f32::NEG_INFINITY, f32::max);
+
+                            let tex_w = display_shape.last().copied().unwrap_or(1) as i32;
+                            let tex_h = if display_shape.len() >= 2 {
+                                display_shape[display_shape.len() - 2] as i32
+                            } else {
+                                1
+                            };
+
+                            if data_min.is_finite() && data_max.is_finite() && tex_w > 0 && tex_h > 0 {
+                                zoomable_weak.set_tensor_data(&data, tex_w, tex_h, data_min, data_max);
+                                zoomable_weak.set_legend(data_min, data_max);
+                                zoomable_weak.widget().set_visible(true);
+                            }
+                        }
                     }
 
-                    heatmap_weak.set_data(data, &display_shape);
-                    heatmap_weak.widget().set_visible(true);
-
-                    // Hide loading indicator
                     if let Some(loading_box) = loading_box_weak.upgrade() {
                         loading_box.set_visible(false);
                     }
@@ -705,26 +724,23 @@ impl TensorPage {
                     if let Some(btn) = toggle_btn_weak.upgrade() {
                         btn.set_sensitive(true);
 
-                        // Store tensor dimensionality for button click handler
                         let is_1d_tensor = is_1d;
 
-                        // Set initial button label based on current display mode
-                        // For 1D: Line Plot -> Histogram (no Heatmap option)
-                        // For 2D+: Heatmap <-> Histogram
                         if is_1d_tensor {
                             btn.set_label("Show Histogram");
                         } else {
                             btn.set_label("Show Histogram");
                         }
 
-                        // Connect click handler to toggle display mode
                         let heatmap_for_toggle = heatmap_weak.clone();
+                        let zoomable_for_toggle = zoomable_weak.clone();
+                        let current_is_zoomed = Rc::new(RefCell::new(!is_1d));
                         btn.connect_clicked(move |button| {
-                            let current_mode = heatmap_for_toggle.get_display_mode_label();
+                            let is_1d = is_1d_tensor;
+                            let showing_zoom = *current_is_zoomed.borrow();
 
-                            // Determine the next mode and button label based on tensor dimensionality
-                            if is_1d_tensor {
-                                // 1D tensors only toggle: Line Plot <-> Histogram
+                            if is_1d {
+                                let current_mode = heatmap_for_toggle.get_display_mode_label();
                                 match current_mode.as_str() {
                                     "Line Plot" => {
                                         heatmap_for_toggle.toggle_display_mode();
@@ -735,34 +751,26 @@ impl TensorPage {
                                         button.set_label("Show Histogram");
                                     }
                                     _ => {
-                                        // Fallback - should not happen for 1D tensors
                                         heatmap_for_toggle.set_display_mode_line_plot();
                                         button.set_label("Show Histogram");
                                     }
                                 }
+                            } else if showing_zoom {
+                                zoomable_for_toggle.widget().set_visible(false);
+                                heatmap_for_toggle.set_display_mode(true);
+                                heatmap_for_toggle.widget().set_visible(true);
+                                *current_is_zoomed.borrow_mut() = false;
+                                button.set_label("Show Heatmap");
                             } else {
-                                // 2D+ tensors toggle: Heatmap <-> Histogram
-                                match current_mode.as_str() {
-                                    "Heatmap" => {
-                                        heatmap_for_toggle.toggle_display_mode();
-                                        button.set_label("Show Heatmap");
-                                    }
-                                    "Histogram" => {
-                                        heatmap_for_toggle.toggle_display_mode();
-                                        button.set_label("Show Histogram");
-                                    }
-                                    _ => {
-                                        // Fallback - set to heatmap
-                                        heatmap_for_toggle.set_display_mode(false);
-                                        button.set_label("Show Histogram");
-                                    }
-                                }
+                                heatmap_for_toggle.widget().set_visible(false);
+                                zoomable_for_toggle.widget().set_visible(true);
+                                *current_is_zoomed.borrow_mut() = true;
+                                button.set_label("Show Histogram");
                             }
                         });
                     }
                 }
                 Err(e) => {
-                    // Hide spinner, show error
                     if let Some(loading_box) = loading_box_weak.upgrade() {
                         loading_box.set_visible(false);
                     }

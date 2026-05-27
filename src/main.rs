@@ -9,6 +9,7 @@ mod token_display;
 mod heatmap_widget;
 mod optimized_tokenizer;
 mod tensor_slice;
+mod zoomable_view;
 
 use ui::window::GGUFWindow;
 
