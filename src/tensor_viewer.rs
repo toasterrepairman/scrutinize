@@ -43,13 +43,9 @@ fn calculate_adaptive_max_elements(total_elements: usize) -> usize {
 }
 
 fn calculate_zoomable_max_elements(total_elements: usize) -> usize {
-    match total_elements {
-        0..=1_000_000 => total_elements,
-        _ => {
-            let max_dim = 8192;
-            (max_dim * max_dim).min(total_elements)
-        }
-    }
+    let max_dim = 2048;
+    let max_tex = max_dim * max_dim;
+    total_elements.min(max_tex)
 }
 
 #[derive(Clone, Debug)]
@@ -695,7 +691,8 @@ impl TensorPage {
                         zoomable_weak.widget().set_visible(false);
                         eprintln!("Tensor {} is 1D, using line plot mode", tensor_clone.name);
                     } else {
-                        heatmap_weak.widget().set_visible(false);
+                        heatmap_weak.set_drawing_area_visible(false);
+                        heatmap_weak.widget().set_visible(true);
 
                         if !data.is_empty() {
                             let data_min = data.iter().copied().filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min);
@@ -758,11 +755,11 @@ impl TensorPage {
                             } else if showing_zoom {
                                 zoomable_for_toggle.widget().set_visible(false);
                                 heatmap_for_toggle.set_display_mode(true);
-                                heatmap_for_toggle.widget().set_visible(true);
+                                heatmap_for_toggle.set_drawing_area_visible(true);
                                 *current_is_zoomed.borrow_mut() = false;
                                 button.set_label("Show Heatmap");
                             } else {
-                                heatmap_for_toggle.widget().set_visible(false);
+                                heatmap_for_toggle.set_drawing_area_visible(false);
                                 zoomable_for_toggle.widget().set_visible(true);
                                 *current_is_zoomed.borrow_mut() = true;
                                 button.set_label("Show Histogram");

@@ -422,9 +422,12 @@ impl HeatmapWidget {
         *self.display_mode.borrow() == DisplayMode::Heatmap
     }
 
-    /// Check if currently in histogram mode
     pub fn is_histogram_mode(&self) -> bool {
         *self.display_mode.borrow() == DisplayMode::Histogram
+    }
+
+    pub fn set_drawing_area_visible(&self, visible: bool) {
+        self.drawing_area.set_visible(visible);
     }
 
     /// Get current display mode as a string (for UI labels)
