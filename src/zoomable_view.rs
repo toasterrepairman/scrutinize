@@ -5,8 +5,8 @@ use gtk::graphene;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{
-    Adjustment, Box as GtkBox, DrawingArea, EventControllerScroll, EventControllerScrollFlags,
-    GestureZoom, Label, Orientation, Scrollbar, Widget,
+    Adjustment, Box as GtkBox, DrawingArea, EventControllerMotion, EventControllerScroll,
+    EventControllerScrollFlags, GestureDrag, GestureZoom, Label, Orientation, Scrollbar, Widget,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -248,6 +248,10 @@ pub struct ZoomableView {
     min_val: Cell<f64>,
     max_val: Cell<f64>,
     gesture_zoom_start: Cell<f64>,
+    mouse_x: Cell<f64>,
+    mouse_y: Cell<f64>,
+    drag_start_hx: Cell<f64>,
+    drag_start_hy: Cell<f64>,
 }
 
 impl ZoomableView {
@@ -287,6 +291,10 @@ impl ZoomableView {
             .build();
 
         let gesture_zoom = GestureZoom::new();
+
+        let motion_ctrl = EventControllerMotion::new();
+
+        let drag = GestureDrag::new();
 
         let legend_bar = DrawingArea::new();
         legend_bar.set_content_width(200);
@@ -358,7 +366,10 @@ impl ZoomableView {
         let z_clone = z_clone_ref.clone();
         scroll_ctrl.connect_scroll(move |_, _, dy| {
             if let Some(z) = z_clone.borrow().as_ref() {
-                z.adjust_zoom(if dy < 0.0 { 1.2 } else { 1.0 / 1.2 });
+                let factor = if dy < 0.0 { 1.2 } else { 1.0 / 1.2 };
+                let mx = z.mouse_x.get();
+                let my = z.mouse_y.get();
+                z.adjust_zoom(factor, mx, my);
             }
             glib::Propagation::Proceed
         });
@@ -372,21 +383,50 @@ impl ZoomableView {
         });
 
         let z_clone = z_clone_ref.clone();
-        gesture_zoom.connect_scale_changed(move |_, scale| {
+        gesture_zoom.connect_scale_changed(move |gesture, scale| {
             if let Some(z) = z_clone.borrow().as_ref() {
                 let start = z.gesture_zoom_start.get();
                 if start <= 0.0 {
                     z.gesture_zoom_start.set(z.zoom.get());
                     return;
                 }
-                let new_zoom = start * scale;
-                let clamped = new_zoom.clamp(0.1, 100.0);
-                z.zoom.set(clamped);
-                z.canvas.set_zoom(clamped);
-                z.update_zoom_label();
+                let new_zoom = (start * scale).clamp(0.1, 100.0);
+                let (cx, cy) = gesture.bounding_box_center().unwrap_or((
+                    z.mouse_x.get(),
+                    z.mouse_y.get(),
+                ));
+                z.zoom_centered_at(new_zoom, cx, cy);
             }
         });
         canvas.add_controller(gesture_zoom);
+
+        let z_clone = z_clone_ref.clone();
+        motion_ctrl.connect_motion(move |_, x, y| {
+            if let Some(z) = z_clone.borrow().as_ref() {
+                z.mouse_x.set(x);
+                z.mouse_y.set(y);
+            }
+        });
+
+        let z_clone = z_clone_ref.clone();
+        drag.connect_drag_begin(move |_, _, _| {
+            if let Some(z) = z_clone.borrow().as_ref() {
+                z.drag_start_hx.set(z.hadj.value());
+                z.drag_start_hy.set(z.vadj.value());
+            }
+        });
+        let z_clone = z_clone_ref.clone();
+        drag.connect_drag_update(move |_, ox, oy| {
+            if let Some(z) = z_clone.borrow().as_ref() {
+                let new_hx = (z.drag_start_hx.get() - ox).max(0.0);
+                let new_hy = (z.drag_start_hy.get() - oy).max(0.0);
+                z.hadj.set_value(new_hx);
+                z.vadj.set_value(new_hy);
+            }
+        });
+
+        canvas.add_controller(motion_ctrl);
+        canvas.add_controller(drag);
 
         let slf = ZoomableView {
             container: container.clone(),
@@ -403,6 +443,10 @@ impl ZoomableView {
             min_val: Cell::new(0.0),
             max_val: Cell::new(1.0),
             gesture_zoom_start: Cell::new(1.0),
+            mouse_x: Cell::new(0.0),
+            mouse_y: Cell::new(0.0),
+            drag_start_hx: Cell::new(0.0),
+            drag_start_hy: Cell::new(0.0),
         };
 
         *z_clone_ref.borrow_mut() = Some(slf.clone());
@@ -410,10 +454,19 @@ impl ZoomableView {
         slf
     }
 
-    fn adjust_zoom(&self, factor: f64) {
+    fn adjust_zoom(&self, factor: f64, cx: f64, cy: f64) {
         let new = (self.zoom.get() * factor).clamp(0.1, 100.0);
-        self.zoom.set(new);
-        self.canvas.set_zoom(new);
+        self.zoom_centered_at(new, cx, cy);
+    }
+
+    fn zoom_centered_at(&self, new_zoom: f64, cx: f64, cy: f64) {
+        let old_zoom = self.zoom.get();
+        let content_x = (self.hadj.value() + cx) / old_zoom;
+        let content_y = (self.vadj.value() + cy) / old_zoom;
+        self.zoom.set(new_zoom);
+        self.canvas.set_zoom(new_zoom);
+        self.hadj.set_value(content_x * new_zoom - cx);
+        self.vadj.set_value(content_y * new_zoom - cy);
         self.update_zoom_label();
     }
 
