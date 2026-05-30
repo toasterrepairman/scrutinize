@@ -302,25 +302,18 @@ impl ZoomableView {
                 grad.add_color_stop_rgb(t, r, g, b);
             }
             cr.set_source(&grad).unwrap();
-            cr.set_fill_rule(cairo::FillRule::Winding);
             let r = 4.0;
+            let w = w as f64;
+            let h = h as f64;
             cr.move_to(r, 0.0);
-            cr.line_to(w as f64 - r, 0.0);
-            cr.arc(
-                w as f64 - r,
-                r,
-                r,
-                -std::f64::consts::FRAC_PI_2,
-                std::f64::consts::FRAC_PI_2,
-            );
-            cr.line_to(r, h as f64);
-            cr.arc(
-                r,
-                r,
-                r,
-                std::f64::consts::FRAC_PI_2,
-                std::f64::consts::FRAC_PI_2 * 3.0,
-            );
+            cr.line_to(w - r, 0.0);
+            cr.arc(w - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+            cr.line_to(w, h - r);
+            cr.arc(w - r, h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+            cr.line_to(r, h);
+            cr.arc(r, h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+            cr.line_to(0.0, r);
+            cr.arc(r, r, r, std::f64::consts::PI, std::f64::consts::FRAC_PI_2 * 3.0);
             cr.close_path();
             cr.fill().unwrap();
         });
@@ -338,25 +331,25 @@ impl ZoomableView {
         let legend_labels = GtkBox::new(Orientation::Horizontal, 0);
         legend_labels.set_hexpand(true);
         legend_labels.append(&legend_min);
-        legend_labels.append(&legend_max);
-        let legend_box = GtkBox::new(Orientation::Vertical, 2);
-        legend_box.append(&legend_bar);
-        legend_box.append(&legend_labels);
 
         let zoom_label = Label::new(Some("100%"));
         zoom_label.add_css_class("zoom-label");
         zoom_label.add_css_class("monospace");
+        zoom_label.add_css_class("dim-label");
         zoom_label.set_visible(false);
+        zoom_label.set_halign(gtk::Align::Center);
+        zoom_label.set_hexpand(true);
 
-        let info_bar = GtkBox::new(Orientation::Horizontal, 8);
-        info_bar.set_margin_start(4);
-        info_bar.set_margin_end(4);
-        info_bar.append(&zoom_label);
+        legend_labels.append(&zoom_label);
+        legend_labels.append(&legend_max);
+
+        let legend_box = GtkBox::new(Orientation::Vertical, 2);
+        legend_box.append(&legend_bar);
+        legend_box.append(&legend_labels);
 
         let main_box = GtkBox::new(Orientation::Vertical, 6);
         main_box.append(&outer);
         main_box.append(&legend_box);
-        main_box.append(&info_bar);
 
         container.append(&main_box);
 
